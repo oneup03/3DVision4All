@@ -49,10 +49,10 @@ Run 3DVision games on any 3D display with a Nvidia GPU
   - Download the [Interlaced2Else.slang](https://github.com/oneup03/3DVision4All/raw/refs/heads/main/Interlaced2Else.slang) shader and drop it into the Shader Glass folder
   - Open Shader Glass
   - Set `Input - Pixel Size` to `x1`
-	- Click `Shader - Import Custom` and select the `Interlaced2Else.slang`
+  - Click `Shader - Import Custom` and select the `Interlaced2Else.slang`
   - If needed, go to `Shader - Parameters` and `Swap Eyes` or set `Output Mode` to TaB (SbS is default)
   - If using AR glasses or other Full-SbS displays, set `Output - Aspect Ratio Correction` to `x0.5 (double wide)`
-	- Under `Processing` click `Set as default profile`
+  - Under `Processing` click `Set as default profile`
   - Close Shader Glass
  
 - If using a SR Display (Acer Spatial Labs/Samsung Odyssey 3D)
