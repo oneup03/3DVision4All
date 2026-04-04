@@ -79,7 +79,7 @@ Run 3DVision games on any 3D display with a Nvidia GPU
 - `Alt + Tab` back to the game and let it activate
 - Press `Ctrl + Shift + G` to toggle fullscreen Shader Glass and you should be seeing 3D
 
-
+{% include InterlacedDriver.md %}
 
 
 
