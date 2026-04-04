@@ -7,6 +7,10 @@
 
 {% include 3DFM.md %}
 
+## Emitter Driver
+- If using an emitter and the IR Emitter driver showed as `Not Connected` in 3D Fix Manager, you need to manually install it
+- Download and run the [3dvisioncontrollerdriver.exe](https://github.com/oneup03/3DVision4All/raw/refs/heads/main/3dvisioncontrollerdriver.exe)
+
 ## Device Specific
 
 <details markdown="1">
