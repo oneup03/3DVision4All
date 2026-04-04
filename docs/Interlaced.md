@@ -32,8 +32,8 @@ Compatible with devices like:
 
 
 ## Device Specific Settings
-<details>
-  <summary>Show LG 4K TVs</summary>
+<details markdown="1">
+  <summary markdown="span">Show LG 4K TVs</summary>
 
 </details>
 
