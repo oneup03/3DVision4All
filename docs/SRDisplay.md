@@ -1,9 +1,13 @@
 # SR Displays (Acer Spatial Labs/Samsung Odyssey 3D)
+Compatible with devices like:
+- Acer Spatial Labs
+- Samsung Odyssey 3D
 
+{% include ShaderGlass.md %}
 
+{% include 3DFM.md %}
 
-
-### 3D Game Bridge Installation
+## 3D Game Bridge Installation
 - Install the software package provided with your SR display (Samsung Odyssey 3D Hub or Acer TrueGame)
 - Download the latest <a href="https://reshade.me/#download" target="_blank" rel="noopener noreferrer">ReShade</a> with full add-on support
 - Run the ReShade installer
@@ -26,3 +30,5 @@
     - Enable ReShade's `Performance Mode` checkbox
 - If ReShade settings don't save and you keep getting prompted for the tutorial, you may have to manually edit `ShaderGlass\ReShade.ini` and disable Tutorial with `TutorialProgress=4`
 - Exit Shader Glass
+
+{% include ShaderGlassPlay.md %}

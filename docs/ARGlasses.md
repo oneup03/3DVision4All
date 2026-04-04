@@ -1,9 +1,13 @@
-
-
-
+# AR Glasses
+Compatible with devices like:
+- Xreal
+- Viture
+- RayNeo
+- Rokid
 
 {% include ShaderGlass.md %}
 
+{% include 3DFM.md %}
 
 ## AR Specific Settings
 - Use the hardware or software hotkey on your glasses to switch to Full-SbS mode
