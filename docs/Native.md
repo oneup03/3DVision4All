@@ -7,6 +7,9 @@
 
 {% include 3DFM.md %}
 
+## Device Specific
+3DTV/Projector with Frame Packing/BluRay3D/HDMI3D Support CRU DSR
+
 ## Running a Game
 - Ensure your device is set as your primary display and 3D Vision is enabled
 - Install fixes either manually from <a href="https://helixmod.blogspot.com/2013/10/game-list-automatically-updated.html" target="_blank" rel="noopener noreferrer">Helixmod</a> or using 3D Fix Manager

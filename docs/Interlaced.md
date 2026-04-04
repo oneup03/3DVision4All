@@ -35,6 +35,79 @@ Compatible with devices like:
 <details markdown="1">
   <summary markdown="span">Show LG 4K TVs</summary>
 
+## Picture
+- **Smart Picture Mode:** Off
+- **Picture Mode Settings:** Game (User)
+
+### Basic Picture Settings
+- **OLED Light:** 20  
+  _Dark room setting; can go higher_
+- **Contrast:** 90
+- **Brightness:** 55
+- **Sharpness:** 0
+- **Color:** 60
+- **Tint:** 0
+- **Color Temperature:** C30
+
+### Advanced Controls
+- **Dynamic Contrast:** Off
+- **Dynamic Color:** Off
+- **Preferred Color:** All set to 0
+- **Color Gamut:** Wide _(setting disabled, current value shown)_
+- **Super Resolution:** Off
+- **Gamma:** Medium
+
+### Picture Options
+- **Noise Reduction:** Off
+- **MPEG Noise Reduction:** Off
+- **Black Level:** Low
+- **Real Cinema:** Off _(setting disabled, current value shown)_
+- **Motion Eye Care:** Off
+- **TruMotion:** Off _(setting disabled, current value shown)_
+
+### Aspect Ratio
+- **Aspect Ratio:** 16:9
+- **Just Scan:** On  
+  **Critical for 3D**
+
+### 3D Settings
+- **3D:** Off
+- _All other options disabled_
+
+### Dual Play
+- **Dual Play:** Off
+- **Dual Play Mode:** Top and Bottom _(disabled, current value shown)_
+
+### Additional Settings
+- **Energy Saving:** Off
+- **Eye Comfort Mode:** Off
+
+### OLED Panel Settings
+- **Clear Panel Noise:** _Not a configurable setting_
+- **Screen Shift:** Off  
+  **Critical to avoid eye swapping over time**
+
+## Input Select
+- **HDMI where PC connected:** PC
+
+## General
+> Only settings that may be relevant
+
+- **Quick Start+:** On
+
+### HDMI ULTRA HD Deep Color
+_Required to select **4:4:4** in NVIDIA settings_
+
+- **HDMI# where PC connected:** On
+
+### Mode
+- **Home/Store Mode:** HOME MODE
+
+## Nvidia Control Panel Settings
+- Set Nvidia Color Settings to `YCbCr444` and `Limited` range
+- 
+
+
 </details>
 
 
