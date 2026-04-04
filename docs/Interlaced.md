@@ -105,8 +105,12 @@ _Required to select **4:4:4** in NVIDIA settings_
 
 ## Nvidia Control Panel Settings
 - Set Nvidia Color Settings to `YCbCr444` and `Limited` range
-- 
+- <img width="538" height="650" alt="image" src="https://github.com/user-attachments/assets/18fec27a-5c6b-4cd3-aeec-07f40bdf96ae" />
 
+## HDR
+- You can also enable HDR and Auto HDR in Windows Display Settings
+- HDR can be calibrated using the <a href="https://apps.microsoft.com/detail/9N7F2SM5D1LR?hl=en-us&gl=US&ocid=pdpshare" target="_blank" rel="noopener noreferrer">official app</a> in the Microsoft Store
+- You will have to edit the above TV Picture settings again for the HDR Game Mode
 
 </details>
 
