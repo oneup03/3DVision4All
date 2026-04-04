@@ -5,8 +5,6 @@ Compatible with devices like:
 
 {% include ShaderGlass.md %}
 
-{% include 3DFM.md %}
-
 ## 3D Game Bridge Installation
 - Install the software package provided with your SR display (Samsung Odyssey 3D Hub or Acer TrueGame)
 - Download the latest <a href="https://reshade.me/#download" target="_blank" rel="noopener noreferrer">ReShade</a> with full add-on support

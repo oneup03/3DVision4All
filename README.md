@@ -5,8 +5,8 @@ This is a guide for setting up 3DVision for any 3D Display
 - Nvidia GPU is required
 
 ## 3D Display Guides
-- [3DVision (Frame Sequential), Frame-Packed 3DTV/Anaglyph and Anaglyph](https://oneup03.github.io/3DVision4All/docs/Native)
-- [AR Glasses](https://oneup03.github.io/3DVision4All/docs/ARGlasses)
+- [3DVision (Frame Sequential), Frame-Packed 3DTV/Projector, and Anaglyph](https://oneup03.github.io/3DVision4All/docs/Native)
+- [AR Glasses, Full-SbS Displays](https://oneup03.github.io/3DVision4All/docs/ARGlasses)
 - [SR Displays (Acer Spatial Labs/Samsung Odyssey 3D)](https://oneup03.github.io/3DVision4All/docs/SRDisplay)
 - [Interlaced TVs & Monitors](https://oneup03.github.io/3DVision4All/docs/Interlaced)
 - [SbS/TaB](https://oneup03.github.io/3DVision4All/docs/SbSTaB)
@@ -16,3 +16,5 @@ This is a guide for setting up 3DVision for any 3D Display
 - Joker18 for the 4k EDID override
 - NTM for modified EDID bin for flashing to EDID Emulators
 - MarkAndGo's <a href="https://github.com/markandgo/obs-shaderfilter-mngo/" target="_blank" rel="noopener noreferrer">similar project for OBS</a> that inspired this one
+- Pauldusler for 3D Fix Manager
+- Eincrou for Advanced 3DVision Config
