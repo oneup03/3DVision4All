@@ -5,7 +5,7 @@
   - EDID emulator/dummy plug 
   <img width="239" height="211" alt="image" src="https://github.com/user-attachments/assets/c1ab9338-8b95-498a-b988-ebf9c24c7af2" />
   
-  - Secondary display that you can override the EDID of without causing issues
+  - Secondary display, but you will be limited to its supported resolutions/colors
 
 
 ## EDID Override Options
@@ -13,16 +13,31 @@
 ### 1a. EDID ID Override
 - Download <a href="https://www.monitortests.com/forum/Thread-Custom-Resolution-Utility-CRU" target="_blank" rel="noopener noreferrer">CRU</a> and extract it to a folder
 - Only the `Device ID` has to be changed to enable 3DVision, but it will be limited to the resolutions/colors of the original EDID
+- This only changes the EDID ID on your current PC
+- Set the Device ID to `ACR02B9`
+- If using an EDID emulator/dummy plug, continue on to 1b
 
 ### 1b. EDID Resolution Override (maybe optional)
 - If you are using a physical secondary display, you probably don't want to do this as it could mess it up
 - This should be used for EDID emulators/dummy plugs to ensure you have 4k, 60Hz, 8Bit RGB
+- This only changes the EDID on your current PC
 - Download []() to the CRU folder
 
 ### 2. EDID Firmware Flash (requires writable hardware)
+- If you are using a physical secondary display, you probably don't want to do this as it could mess it up
+- This will change the device to always identify to any PC/Console as 3DVision and Frame-Packed 3D capable, as well as supporting the needed 4k, 60Hz, 8Bit RGB
+- Download NTM's [NTM3D_edid.bin](https://github.com/NTM-3D/3DConsoleBridge/raw/refs/heads/main/NTM3D_edid.bin)
+- Download ToastyX's <a href="https://www.monitortests.com/forum/Thread-EDID-DisplayID-Writer" target="_blank" rel="noopener noreferrer">EDID/DisplayID Writer</a>
+- Run `EDWriter.exe` 
+- Select your EDID emulators/dummy plug in the `Display` drop down
+- You may want to backup your current EDID with `Read EDID` and then `Save File`
+- Select `Load File` and choose the `NTM3D_edid.bin`
+- Select `Write EDID`
+- If you get errors, you will have to try a different EDID Override method
 
 ### 3. EDID Windows Driver (least recommended)
-- Follow the [Interlaced TVs & Monitors](https://oneup03.github.io/3DVision4All/docs/Interlaced#)
+- Follow the [Interlaced Windows Driver](https://oneup03.github.io/3DVision4All/docs/Interlaced#windows-monitor-driver-edid-override) instructions
+
 
 {% include 3DFM.md %}
 

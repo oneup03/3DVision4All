@@ -18,3 +18,4 @@ This is a guide for setting up 3DVision for any 3D Display
 - MarkAndGo's <a href="https://github.com/markandgo/obs-shaderfilter-mngo/" target="_blank" rel="noopener noreferrer">similar project for OBS</a> that inspired this one
 - Pauldusler for 3D Fix Manager
 - Eincrou for Advanced 3DVision Config
+- ToastyX for EDID/DisplayID Writer
