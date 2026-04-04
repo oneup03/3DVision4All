@@ -9,7 +9,7 @@
 
 ## Running a Game
 - Ensure your device is set as your primary display and 3D Vision is enabled
-- Install fixes either manually from <a href="https://helixmod.blogspot.com/" target="_blank" rel="noopener noreferrer">Helixmod</a> or using 3D Fix Manager
+- Install fixes either manually from <a href="https://helixmod.blogspot.com/2013/10/game-list-automatically-updated.html" target="_blank" rel="noopener noreferrer">Helixmod</a> or using 3D Fix Manager
 - Launch the game manually or from 3D Fix Manager and it should start on your device in 3D
 - 3DVision Monitors require the game to run at your 3D refresh rate (120Hz or 100Hz nominally)
 - Frame Packed 3D devices require the game to run at 1280x720 resolution

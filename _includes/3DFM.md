@@ -8,6 +8,7 @@
 <details>
   <summary>Show Optional: Old Driver for DX10/DX11/DX12</summary>
 
+
 ## Optional: Old Driver for DX10/DX11/DX12
 - RTX20xx or older and driver 452.06 and older support 3DVision on all DirectX versions
 - DX12 3DVision doesn't really have any fixes for it and it's not stable with many modern games
@@ -20,6 +21,7 @@
 - <img width="755" height="466" alt="image" src="https://github.com/user-attachments/assets/cd78dd24-126b-4511-a66f-ebc1e2e3d19d" />
 - You should now get this result (no emitter for some displays):
 - <img width="797" height="986" alt="image" src="https://github.com/user-attachments/assets/98a043c8-1d6f-4583-b7b5-b11c6774cdc1" />
+
 
 </details>
 

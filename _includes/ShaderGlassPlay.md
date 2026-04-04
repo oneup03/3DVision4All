@@ -1,6 +1,6 @@
 ## Running a Game
 - Ensure your device is set as your primary display, 3840x2160 resolution, and 3D Vision is enabled as `Acer Passive 3D LCD`
-- Install fixes either manually from <a href="https://helixmod.blogspot.com/" target="_blank" rel="noopener noreferrer">Helixmod</a> or using 3D Fix Manager
+- Install fixes either manually from <a href="https://helixmod.blogspot.com/2013/10/game-list-automatically-updated.html" target="_blank" rel="noopener noreferrer">Helixmod</a> or using 3D Fix Manager
 - Launch the game manually or from 3D Fix Manager and it should start on your device, not your 3D monitor, in interlaced 3D
 - `Alt + Tab` out of the game
 - Launch Shader Glass
