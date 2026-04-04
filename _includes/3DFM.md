@@ -1,9 +1,14 @@
 ## 3DVision Installation
-- If you run into issues with 3DVision stuck in Anaglyph mode or frame sequential modes, try using <a href="https://www.guru3d.com/download/display-driver-uninstaller-download/" target="_blank" rel="noopener noreferrer">DDU</a> in safe mode to completely wipe GPU drivers and redo the installation of this tool
-- Use <a href="https://helixmod.blogspot.com/2017/05/3d-fix-manager.html" target="_blank" rel="noopener noreferrer">3D Fix Manager</a> to install 3DVision drivers
+- If you run into issues with 3DVision stuck in Anaglyph mode or frame sequential modes, try using <a href="https://www.guru3d.com/download/display-driver-uninstaller-download/" target="_blank" rel="noopener noreferrer">DDU</a> in safe mode to completely wipe GPU drivers and redo the installation of this tool. This may wipe software EDID overrides
+- Download <a href="https://helixmod.blogspot.com/2017/05/3d-fix-manager.html" target="_blank" rel="noopener noreferrer">3D Fix Manager</a> and extract it somewhere
   - This can be used to install game fixes and launch them in 3D
-  - Disable 3D with the toggle in the top right
-
+  - You can disable 3D with the toggle in the top right
+- Launch `3DFixManager.exe`
+- Select the `Drivers` tab and click `Install 3D Driver`. The Video Driver is not necessary for DX9 3DVision, so ignore it
+- <img width="709" height="773" alt="image" src="https://github.com/user-attachments/assets/73952332-b8a5-4081-ba13-1d6c222de33a" />
+- A successful installation should appear like this:
+- <img width="709" height="773" alt="image" src="https://github.com/user-attachments/assets/2f8a0f85-a34d-4645-9105-1d33e66481be" />
+- Select the `3D` toggle in the top right to turn off 3D
 
 <details markdown="1">
   <summary markdown="span">Show Optional: Old Driver for DX10/DX11/DX12</summary>
@@ -22,4 +27,3 @@
 - <img width="797" height="986" alt="image" src="https://github.com/user-attachments/assets/98a043c8-1d6f-4583-b7b5-b11c6774cdc1" />
 
 </details>
-
