@@ -10,18 +10,33 @@
 
 ## EDID Override Options
 
+### Choose one of these methods to override your device's EDID:
+
 ### 1a. EDID ID Override
-- Download <a href="https://www.monitortests.com/forum/Thread-Custom-Resolution-Utility-CRU" target="_blank" rel="noopener noreferrer">CRU</a> and extract it to a folder
 - Only the `Device ID` has to be changed to enable 3DVision, but it will be limited to the resolutions/colors of the original EDID
 - This only changes the EDID ID on your current PC
-- Set the Device ID to `ACR02B9`
+- Download <a href="https://www.monitortests.com/forum/Thread-Custom-Resolution-Utility-CRU" target="_blank" rel="noopener noreferrer">CRU</a> and extract it to a folder
+- Run `CRU.exe` as admin
+- Select your device from the drop down menu and select `Edit`
+- Set the Device ID to `ACR02B9` and click `OK`
+- <img width="530" height="407" alt="image" src="https://github.com/user-attachments/assets/05398633-8dc2-4447-b22a-eec0e642b263" />
 - If using an EDID emulator/dummy plug, continue on to 1b
+- Click `OK` to close CRU
+- Run `restart64.exe` as admin and your Nvidia driver will restart
+- `Exit` the Restart app
 
 ### 1b. EDID Resolution Override (maybe optional)
 - If you are using a physical secondary display, you probably don't want to do this as it could mess it up
 - This should be used for EDID emulators/dummy plugs to ensure you have 4k, 60Hz, 8Bit RGB
 - This only changes the EDID on your current PC
-- Download []() to the CRU folder
+- Download [4kHwEDID.bin](https://github.com/oneup03/3DVision4All/raw/refs/heads/main/4kHwEDID.bin) to the CRU folder
+- Make sure you still have the correct device selected in the drop down menu
+- Click `Import` and select the `4kHwEDID.bin` file and click `Open`
+- <img width="541" height="410" alt="image" src="https://github.com/user-attachments/assets/aa1dd4c4-079b-4d52-b6bf-18acce7a3b4c" />
+
+- Click `OK` to close CRU
+- Run `restart64.exe` as admin and your Nvidia driver will restart
+- `Exit` the Restart app
 
 ### 2. EDID Firmware Flash (requires writable hardware)
 - If you are using a physical secondary display, you probably don't want to do this as it could mess it up
@@ -33,6 +48,7 @@
 - You may want to backup your current EDID with `Read EDID` and then `Save File`
 - Select `Load File` and choose the `NTM3D_edid.bin`
 - Select `Write EDID`
+- <img width="292" height="353" alt="image" src="https://github.com/user-attachments/assets/ed42a4e3-ffb8-4845-9f63-7c5bda86b22b" />
 - If you get errors, you will have to try a different EDID Override method
 
 ### 3. EDID Windows Driver (least recommended)
