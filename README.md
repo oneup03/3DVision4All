@@ -10,6 +10,7 @@ This is a guide for setting up 3DVision for any 3D Display
 - [SR Displays (Acer Spatial Labs/Samsung Odyssey 3D)](https://oneup03.github.io/3DVision4All/docs/SRDisplay)
 - [Interlaced TVs & Monitors](https://oneup03.github.io/3DVision4All/docs/Interlaced)
 - [SbS/TaB](https://oneup03.github.io/3DVision4All/docs/SbSTaB)
+- [VR HMD](https://oneup03.github.io/3DVision4All/docs/HMD)
 
 ## Thanks to:
 - Mausimus for Shader Glass
@@ -19,3 +20,5 @@ This is a guide for setting up 3DVision for any 3D Display
 - Pauldusler for 3D Fix Manager
 - Eincrou for Advanced 3DVision Config
 - ToastyX for EDID/DisplayID Writer
+- rajkosto for NvTimingsEd
+- Azurfel/Abwezi for LG C1/CX guide
