@@ -26,4 +26,11 @@
 - You should now get this result (no emitter for some displays):
 - <img width="797" height="986" alt="image" src="https://github.com/user-attachments/assets/98a043c8-1d6f-4583-b7b5-b11c6774cdc1" />
 
+<img width="391" height="302" alt="image" src="https://github.com/user-attachments/assets/828f9f5c-a3c4-4406-9f16-3ca9794e0fc7" />
+
+<img width="441" height="218" alt="image" src="https://github.com/user-attachments/assets/9d548df4-35df-4e2d-bbc1-496478c7d8c5" />
+
+
+
+
 </details>
