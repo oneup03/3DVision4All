@@ -1,8 +1,9 @@
 # 3DVision4All
 This is a guide for setting up 3DVision for any 3D Display
-- All DirectX versions are supported if using a RTX20 series GPU or older and driver <= 452.06
-- DirectX9 is supported on all GPUs and driver versions
+- All DirectX versions are supported if using a RTX20 series GPU or older and driver <= 425.31 (452.06 works for DX11 but not 10/12)
+- DirectX9 (and earlier) is supported on all GPUs and driver versions
 - Nvidia GPU is required
+- Windows 11 Works
 
 ## 3D Display Guides
 - [3DVision (Frame Sequential), Frame-Packed 3DTV/Projector, and Anaglyph](https://oneup03.github.io/3DVision4All/docs/Native)

@@ -6,6 +6,7 @@
   <img width="239" height="211" alt="image" src="https://github.com/user-attachments/assets/c1ab9338-8b95-498a-b988-ebf9c24c7af2" />
   
   - Secondary display, but you will be limited to its supported resolutions/colors
+  - MS2130 Capture Card with custom firmware from <a href="https://github.com/NTM-3D/3DConsoleBridge?tab=readme-ov-file#firmware-patching-guide" target="_blank" rel="noopener noreferrer">NTM</a> (skip EDID steps below)
 
 
 ## EDID Override Options

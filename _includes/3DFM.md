@@ -6,15 +6,23 @@
 - Launch `3DFixManager.exe`
 - Select the `Drivers` tab and click `Install 3D Driver`. The Video Driver is not necessary for DX9 3DVision, so ignore it
 - <img width="709" height="773" alt="image" src="https://github.com/user-attachments/assets/73952332-b8a5-4081-ba13-1d6c222de33a" />
+- If prompted, choose `Quick Setup`
+- <img width="441" height="218" alt="image" src="https://github.com/user-attachments/assets/9d548df4-35df-4e2d-bbc1-496478c7d8c5" />
 - A successful installation should appear like this:
 - <img width="709" height="773" alt="image" src="https://github.com/user-attachments/assets/2f8a0f85-a34d-4645-9105-1d33e66481be" />
+- On Some drivers, you may need to use the `Complete 3D Setup` button, as the Nvidia 3DVision wizard will fail to run
+- <img width="391" height="302" alt="image" src="https://github.com/user-attachments/assets/828f9f5c-a3c4-4406-9f16-3ca9794e0fc7" />
 - Select the `3D` toggle in the top right to turn off 3D
 
 <details markdown="1">
   <summary markdown="span">Show Optional: Old Driver for DX10/DX11/DX12</summary>
 
 ## Optional: Old Driver for DX10/DX11/DX12
-- RTX20xx or older and driver 452.06 and older support 3DVision on all DirectX versions
+- DX10-12 may be less compatible/stable with the EDID ShaderGlass method, but should work for native 3DVision or Interlaced displays
+- RTX20xx or older is required
+  - RTX20xx Super series can only go back to driver 452.06
+- DX10 and DX12 need driver 425.31
+- DX11 Works on any driver <= 452.06
 - DX12 3DVision doesn't really have any fixes for it and it's not stable with many modern games
 - Download either <a href="https://www.nvidia.com/en-us/drivers/details/162980/" target="_blank" rel="noopener noreferrer">452.06</a> or <a href="https://www.nvidia.com/en-us/drivers/details/145872/" target="_blank" rel="noopener noreferrer">425.31</a> somewhere
 - Unplug/Disable your Internet connection
@@ -25,12 +33,5 @@
 - <img width="755" height="466" alt="image" src="https://github.com/user-attachments/assets/cd78dd24-126b-4511-a66f-ebc1e2e3d19d" />
 - You should now get this result (no emitter for some displays):
 - <img width="797" height="986" alt="image" src="https://github.com/user-attachments/assets/98a043c8-1d6f-4583-b7b5-b11c6774cdc1" />
-
-<img width="391" height="302" alt="image" src="https://github.com/user-attachments/assets/828f9f5c-a3c4-4406-9f16-3ca9794e0fc7" />
-
-<img width="441" height="218" alt="image" src="https://github.com/user-attachments/assets/9d548df4-35df-4e2d-bbc1-496478c7d8c5" />
-
-
-
 
 </details>
