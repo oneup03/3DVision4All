@@ -55,9 +55,14 @@ VR HMDs have a few options to play 3DVision games on a virtual screen
 
 {% include ShaderGlass.md %}
 
+## VR Additional Setup
+- In the Steam Library page for Shader Glass, Select the `Gear` icon and select `Properties`
+- Set `Launch Options` to `-p` and close the Properties window
+
 {% include ShaderGlassPlay.md %}
 
 ## VR Additional Steps
+- After selecting the input window, select `Processing -> Start`
 - Start Virtual Desktop
 - Select the fullscreen Shader Glass Window as the input
 - Set the 3D mode to TaB/OU
