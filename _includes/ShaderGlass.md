@@ -76,6 +76,8 @@
 ## Shader Glass Installation
 - Install `Shader Glass` on Steam or <a href="https://github.com/mausimus/ShaderGlass" target="_blank" rel="noopener noreferrer">from GitHub</a>
 - Download the [Interlaced2Else.slang](https://github.com/oneup03/3DVision4All/raw/refs/heads/main/Interlaced2Else.slang) shader and drop it into the Shader Glass folder
+- In the Steam Library page for Shader Glass, Select the `Gear` icon and select `Properties`
+- Set `Launch Options` to `-p` and close the Properties window
 - Open Shader Glass
 - Set `Input - Pixel Size` to `x1`
 - Click `Shader - Import Custom` and select the `Interlaced2Else.slang`
