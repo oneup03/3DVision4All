@@ -16,6 +16,13 @@ VR HMDs have a few options to play 3DVision games on a virtual screen
 - `Apply`
 - Close Nvidia Control Panel
 
+## Katanga Setup
+- Run katanga.exe from your `3DFM\Tools\Katanga` folder
+- VR should start and you should see a slideshow on a curved virtual monitor
+- `Home` key will flatten the display
+- `Arrow Keys` will move and resize the slideshow
+- Close Katanga
+
 ## Game Setup
 - Helixmod installation
     - Run the game at least once to configure graphics settings according to any requirements from the 3DVision driver or Helixmod
