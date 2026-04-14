@@ -12,7 +12,10 @@
 - <img width="709" height="773" alt="image" src="https://github.com/user-attachments/assets/2f8a0f85-a34d-4645-9105-1d33e66481be" />
 - On Some drivers, you may need to use the `Complete 3D Setup` button, as the Nvidia 3DVision wizard will fail to run
 - <img width="391" height="302" alt="image" src="https://github.com/user-attachments/assets/828f9f5c-a3c4-4406-9f16-3ca9794e0fc7" />
+- You can also adjust the 3D hotkeys and view the defaults on this tab:
+- <img width="693" height="740" alt="image" src="https://github.com/user-attachments/assets/71d9c5b9-0de5-46dc-9ef6-4548d06414ba" />
 - Select the `3D` toggle in the top right to turn off 3D
+- ***NOTE: A game needs a pre-existing Nvidia profile with the `StereoProfile` flag set appropriately for any 3D settings to save with `Ctrl + F7`.*** Reference <a href="https://wiki.bo3b.net/index.php?title=Driver_Profile_Settings" target="_blank" rel="noopener noreferrer">Bo3b's Profile Guide</a> for how to use Nvidia Inspector to set this and tweak 3D Profile settings.
 
 <details markdown="1">
   <summary markdown="span">Show Optional: Old Driver for DX10/DX11/DX12</summary>
