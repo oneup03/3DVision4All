@@ -16,9 +16,11 @@ This is a guide for setting up 3DVision for any 3D Display
 ## Thanks to:
 - Mausimus for Shader Glass
 - Joker18 for the 4k EDID override
-- NTM for modified EDID bin for flashing to EDID Emulators
+- NTM for modified EDID bin for flashing to EDID Emulators & Capture Cards
 - MarkAndGo's <a href="https://github.com/markandgo/obs-shaderfilter-mngo/" target="_blank" rel="noopener noreferrer">similar project for OBS</a> that inspired this one
 - Pauldusler for 3D Fix Manager
+- Bo3b for HelixVision/Katanga and Nvidia Profile Guide
+- Orbmu2k for Nvidia Profile Inspector
 - Eincrou for Advanced 3DVision Config
 - ToastyX for EDID/DisplayID Writer
 - rajkosto for NvTimingsEd
