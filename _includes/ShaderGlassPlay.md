@@ -6,5 +6,6 @@
 - Launch Shader Glass
 - If necessary, activate the Interlaced2Else shader via selecting `Shader - Recent Imports - Interlaced2Else`
 - Select the game window under `Input - Window`
-- `Alt + Tab` back to the game and let it activate
 - Press `Ctrl + Shift + G` to toggle fullscreen Shader Glass and you should be seeing 3D
+- `Alt + Tab` back to the game and let it activate
+- May need to toggle resolution setting in-game (even if it's correct) to get the 3D to refresh/display properly
