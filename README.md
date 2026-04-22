@@ -5,6 +5,13 @@ This is a guide for setting up 3DVision for any 3D Display
 - Nvidia GPU is required
 - Windows 11 Works
 
+***Video Guide:***
+
+
+<a href="https://youtu.be/HciJ3LabhNk" target="_blank" rel="noopener noreferrer">
+  <img src="https://img.youtube.com/vi/HciJ3LabhNk/hqdefault.jpg" alt="Video guide available here">
+</a>
+
 ## 3D Display Guides
 - [3DVision (Frame Sequential), Frame-Packed 3DTV/Projector, and Anaglyph](https://oneup03.github.io/3DVision4All/docs/Native)
 - [AR Glasses, Full-SbS Displays](https://oneup03.github.io/3DVision4All/docs/ARGlasses)
