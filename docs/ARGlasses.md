@@ -15,3 +15,6 @@ Compatible with devices like:
 - Close Shader Glass
 
 {% include ShaderGlassPlay.md %}
+
+
+{% include Notes.md %}

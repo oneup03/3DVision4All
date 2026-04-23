@@ -75,3 +75,6 @@ VR HMDs have a few options to play 3DVision games on a virtual screen
 - Set the 3D mode to TaB/OU
 
 </details>
+
+
+{% include Notes.md %}

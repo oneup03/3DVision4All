@@ -144,3 +144,7 @@ If greyed out:
 - Launch the game manually or from 3D Fix Manager and it should start on your device in 3D
 - 3DVision Monitors require the game to run at your 3D refresh rate (120Hz or 100Hz nominally)
 - Frame Packed 3D devices require the game to run at 1280x720 resolution
+- Frame Sequential 3DVision requires custom resolution workarounds on latest drivers to properly activate 3D. Can try this modified <a href="https://www.monitortests.com/strobelight-beta4-swapped.zip" target="_blank" rel="noopener noreferrer">Strobelight tool</a>
+
+
+{% include Notes.md %}

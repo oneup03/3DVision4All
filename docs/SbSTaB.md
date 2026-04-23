@@ -5,3 +5,6 @@
 {% include ShaderGlass.md %}
 
 {% include ShaderGlassPlay.md %}
+
+
+{% include Notes.md %}

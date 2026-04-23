@@ -32,3 +32,5 @@ This is a guide for setting up 3DVision for any 3D Display
 - ToastyX for EDID/DisplayID Writer
 - rajkosto for NvTimingsEd
 - Azurfel/Abwezi for LG C1/CX guide
+- Chiri for various tools
+- Bizonu for 3DVision Eye Swapper

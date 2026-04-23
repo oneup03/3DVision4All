@@ -30,3 +30,6 @@ Compatible with devices like:
 - Exit Shader Glass
 
 {% include ShaderGlassPlay.md %}
+
+
+{% include Notes.md %}
