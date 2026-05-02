@@ -14,6 +14,17 @@
 ## Device Specific
 
 <details markdown="1">
+  <summary markdown="span">Show 3DVision Monitor</summary>
+
+## 3DVision Monitors
+- 3DVision often doesn't fully activate (LightBoost mode) on latest drivers
+- Use <a href="https://github.com/oneup03/LightBoostTool" target="_blank" rel="noopener noreferrer">LightBoostTool</a> to manually activate/deactivate 3D LightBoost mode
+- Your monitor OSD should report 3D Mode or LightBoost or have a green LED, etc
+- <img width="2545" height="1576" alt="image" src="https://github.com/user-attachments/assets/f9b67387-907a-440c-b759-58c9dda330d1" />
+
+
+</details>
+<details markdown="1">
   <summary markdown="span">Show 3DTV/Projector</summary>
 
 ## 3DTV/Projector with Frame Packing/BluRay3D/HDMI3D Support
