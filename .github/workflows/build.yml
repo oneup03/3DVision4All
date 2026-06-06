@@ -33,6 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          token: ${{ secrets.SUBMODULE_PAT }}
 
       - name: Set up MSVC build env (${{ matrix.arch }})
         uses: ilammy/msvc-dev-cmd@v1
