@@ -1,0 +1,33 @@
+# Build outputs
+bin/
+lib/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.userprefs
+*.ipdb
+*.iobj
+*.ilk
+*.pdb
+*.exp
+
+# Visual Studio Code (optional per-user)
+.vscode/
+
+# Local test installs
+*.log
+3dvision4all.log
+
+# Build artifacts left inside submodule trees by our orchestration script
+# (Deviare2 places NktHookLib output here; SR-lib places SR-md.lib in its
+# own subtree.  The submodules themselves manage their own .gitignore for
+# anything tracked.)
+third_party/Deviare2/Externals/DeviareInProc/bin/
+third_party/Deviare2/Externals/DeviareInProc/lib/
+third_party/Deviare2/Externals/DeviareInProc/obj/
+third_party/SR-lib/SR-lib/lib/

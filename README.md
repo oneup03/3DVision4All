@@ -34,3 +34,6 @@ This is a guide for setting up 3DVision for any 3D Display
 - Azurfel/Abwezi for LG C1/CX guide
 - Chiri for various tools
 - Bizonu for 3DVision Eye Swapper
+
+## License
+3DVision4All is licensed under the **GNU General Public License v3.0 or later** — see [LICENSE](LICENSE) for the full text. This is required because the project links the [Deviare2](https://github.com/nektra/Deviare2) hooking engine, which is offered under GPL-3.0 (or a separate commercial license from Nektra).

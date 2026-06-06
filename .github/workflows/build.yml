@@ -1,0 +1,118 @@
+name: Build
+
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '_includes/**'
+      - '**.md'
+      - '*.inf'
+      - '*.bin'
+      - '*.exe'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required by the release step to push the "latest" tag
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} Release
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            arch:     x86
+          - platform: x64
+            arch:     amd64
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC build env (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      # Obj2Inc is a build-time host tool consumed by NktHookLib's MASM
+      # rules. Always built as Win32 — it runs on the build host (WoW64 on
+      # x64 runners) regardless of which target arch we're producing.
+      - name: Build Obj2Inc (Deviare2)
+        shell: cmd
+        run: >
+          msbuild third_party\Deviare2\Externals\DeviareInProc\Obj2Inc\Obj2Inc_2017.vcxproj
+          /p:Configuration=Release /p:Platform=Win32
+          /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0
+          /m /v:minimal
+
+      - name: Build NktHookLib (Deviare2)
+        shell: cmd
+        run: >
+          msbuild third_party\Deviare2\Externals\DeviareInProc\NktHookLib\NktHookLib_2017.vcxproj
+          /p:Configuration=Release /p:Platform=${{ matrix.platform }}
+          /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0
+          /m /v:minimal
+
+      - name: Build SR-lib (SimulatedReality / SR-md)
+        shell: cmd
+        run: >
+          msbuild third_party\SR-lib\SimulatedReality.vcxproj
+          /p:Configuration=Release-MD /p:Platform=${{ matrix.platform }}
+          /m /v:minimal
+
+      - name: Build 3DVision4All (Core + proxies)
+        shell: cmd
+        run: >
+          msbuild 3DVision4All.sln
+          /p:Configuration=Release /p:Platform=${{ matrix.platform }}
+          /m /v:minimal
+
+      - name: Stage release package
+        shell: pwsh
+        run: |
+          $stage = "stage/3DVision4All-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "bin/${{ matrix.platform }}-Release/*.dll" -Destination $stage
+          Copy-Item "3dvision4all.ini"                         -Destination $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "3DVision4All-${{ matrix.platform }}-Release.zip" -Force
+          Get-ChildItem "3DVision4All-${{ matrix.platform }}-Release.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3DVision4All-${{ matrix.platform }}-Release
+          path: 3DVision4All-${{ matrix.platform }}-Release.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish "latest" pre-release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest build (${{ github.sha }})"
+          body: |
+            Auto-built pre-release from `${{ github.sha }}` on branch `${{ github.ref_name }}`.
+
+            Drop the matching proxy DLL (whichever the target game statically imports — `dinput8`, `dsound`, `winmm`, or `version`) plus `3dvision4all.ini` into the game's EXE folder.
+          prerelease: true
+          make_latest: 'false'
+          files: artifacts/*.zip

@@ -1,0 +1,88 @@
+/*
+ * This file is part of 3DVision4All.
+ *
+ * 3DVision4All is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * 3DVision4All is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with 3DVision4All. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "Core.h"
+
+#include <shlwapi.h>
+#pragma comment(lib, "Shlwapi.lib")
+
+
+// Resolve 3dvision4all.ini path next to the running EXE.
+static void GetIniPath(wchar_t out[MAX_PATH])
+{
+    wchar_t exePath[MAX_PATH] = L"";
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    wchar_t* slash = wcsrchr(exePath, L'\\');
+    if (slash) *(slash + 1) = L'\0';
+    swprintf_s(out, MAX_PATH, L"%s3dvision4all.ini", exePath);
+}
+
+
+// Resolve a path string from the INI: if relative, anchor it to the EXE
+// directory so logs land next to the game.
+static void ResolveRelativePath(const wchar_t* in, wchar_t out[MAX_PATH])
+{
+    if (PathIsRelativeW(in)) {
+        wchar_t exePath[MAX_PATH] = L"";
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        wchar_t* slash = wcsrchr(exePath, L'\\');
+        if (slash) *(slash + 1) = L'\0';
+        swprintf_s(out, MAX_PATH, L"%s%s", exePath, in);
+    } else {
+        wcscpy_s(out, MAX_PATH, in);
+    }
+}
+
+
+static StereoMode ParseMode(const wchar_t* s)
+{
+    if (_wcsicmp(s, L"sbs_half")          == 0) return StereoMode::SbsHalf;
+    if (_wcsicmp(s, L"sbs_full")          == 0) return StereoMode::SbsFull;
+    if (_wcsicmp(s, L"tab")               == 0) return StereoMode::Tab;
+    if (_wcsicmp(s, L"row_interlaced")    == 0) return StereoMode::RowInterlaced;
+    if (_wcsicmp(s, L"column_interlaced") == 0) return StereoMode::ColumnInterlaced;
+    if (_wcsicmp(s, L"checkerboard")      == 0) return StereoMode::Checkerboard;
+    if (_wcsicmp(s, L"leiasr")            == 0) return StereoMode::LeiaSR;
+    return StereoMode::SbsHalf;
+}
+
+
+void Config_Load(Config& cfg)
+{
+    wchar_t iniPath[MAX_PATH] = L"";
+    GetIniPath(iniPath);
+
+    wchar_t buf[MAX_PATH];
+
+    GetPrivateProfileStringW(L"stereo", L"mode", L"sbs_half", buf, _countof(buf), iniPath);
+    cfg.mode = ParseMode(buf);
+
+    cfg.swap_eyes = GetPrivateProfileIntW(L"stereo", L"swap_eyes", 1, iniPath) != 0;
+
+    cfg.ar_per_eye_width  = (UINT)GetPrivateProfileIntW(L"stereo", L"ar_per_eye_width",  0, iniPath);
+    cfg.ar_per_eye_height = (UINT)GetPrivateProfileIntW(L"stereo", L"ar_per_eye_height", 0, iniPath);
+    cfg.ar_monitor_index  =      GetPrivateProfileIntW(L"stereo", L"ar_monitor_index",  0, iniPath);
+
+    cfg.defeat_directflip = GetPrivateProfileIntW(L"stereo", L"defeat_directflip", 1, iniPath);
+
+    wchar_t logRel[MAX_PATH] = L"";
+    GetPrivateProfileStringW(L"debug", L"log_file", L"3dvision4all.log",
+                             logRel, _countof(logRel), iniPath);
+    ResolveRelativePath(logRel, cfg.log_path);
+
+    cfg.log_level = GetPrivateProfileIntW(L"debug", L"log_level", 1, iniPath);
+}
