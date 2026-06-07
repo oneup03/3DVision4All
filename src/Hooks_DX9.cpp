@@ -252,11 +252,26 @@ static void CopyStageToShared_MaybeSwap(IDirect3DDevice9* device)
 //
 // Windowed=TRUE requires FullScreen_RefreshRateInHz=0; DX9 will reject
 // non-zero refresh in windowed mode. PresentationInterval is left alone.
+//
+// Sticky viewport lock: when the game's FIRST CreateDevice asked for
+// windowed=TRUE, we record that in s_viewportLockedFromInitialWindowed and
+// thereafter SUPPRESS the BB-dim override on every CreateDevice/Reset for
+// this process. Engines that cache viewport / projection from their initial
+// CreateDevice (notably UE3 — Brothers, Dishonored, etc.) silently keep
+// rendering at the game's original requested dims even after we force a
+// different BB, producing a small inset of the game inside a larger BB
+// ("picture in picture" / "top-left quadrant" failure modes). A game that
+// opens windowed has declared its own dims; respecting them avoids the
+// trap. Games that go straight to fullscreen still get the override —
+// that's the case the override exists for. Set in Hooked_CreateDevice.
+static bool s_viewportLockedFromInitialWindowed = false;
+
 static void ApplyPresentParamOverrides(D3DPRESENT_PARAMETERS* pp)
 {
     if (!pp) return;
     pp->Windowed                   = TRUE;
     pp->FullScreen_RefreshRateInHz = 0;
+    if (s_viewportLockedFromInitialWindowed) return;
     if (g_config.render_width > 0 && g_config.render_height > 0) {
         pp->BackBufferWidth  = g_config.render_width;
         pp->BackBufferHeight = g_config.render_height;
@@ -572,6 +587,20 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
              pPresentationParameters->BackBufferFormat,
              pPresentationParameters->Windowed,
              pPresentationParameters->SwapEffect);
+    }
+
+    // Sticky viewport lock — see comment on s_viewportLockedFromInitialWindowed.
+    // Captured here (not in ApplyPresentParamOverrides) so the lock is anchored
+    // to the FIRST CreateDevice's game intent, regardless of how many Resets
+    // happen later.
+    static bool s_capturedInitial = false;
+    if (!s_capturedInitial && pPresentationParameters) {
+        s_capturedInitial = true;
+        if (pPresentationParameters->Windowed) {
+            s_viewportLockedFromInitialWindowed = true;
+            KLOG(L"  initial CreateDevice was windowed — "
+                 L"viewport-locked, BB dim override suppressed for this process\n");
+        }
     }
 
     ApplyPresentParamOverrides(pPresentationParameters);
