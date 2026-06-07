@@ -75,7 +75,7 @@ static HANDLE                     s_openedHandle = nullptr;
 // auto-upscale in our DX11 build of SDK 1.34.10 — it samples the input
 // texture at panel-pixel coordinates and writes to the bound RTV. Feeding it
 // the raw 2*gameW × gameH staging puts the image in the top-left of the
-// panel. So we run the SbsHalf compose shader (linear sampler) into a
+// panel. So we run the Sbs compose shader (linear sampler) into a
 // panel-sized SbS intermediate first, then hand THAT to the weaver. Each
 // half is panelW/2 × panelH, so per-eye = (panelW/2, panelH) lines up with
 // what the wrapper now reports via setInputViewTexture(tex_desc.Width / 2,
@@ -448,7 +448,7 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
         bool didWeave = false;
         if (g_config.mode == StereoMode::LeiaSR) {
             // Two-pass: upscale staging → panel-sized SbS intermediate via
-            // the SbsHalf passthrough shader (linear sampler does the
+            // the Sbs passthrough shader (linear sampler does the
             // stretch), then weave intermediate → BB. The weaver doesn't
             // upscale on its own in our DX11 build.
             if (EnsureLeiaSrcTexture()) {
@@ -456,7 +456,7 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
                 s_contextB->OMSetRenderTargets(1, &s_leiaSrcRTV, nullptr);
                 s_contextB->RSSetViewports(1, &vp);
                 Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_leiaSrcRTV,
-                                  s_bbWidth, s_bbHeight, StereoMode::SbsHalf);
+                                  s_bbWidth, s_bbHeight, StereoMode::Sbs);
 
                 if (LeiaSR_TryInit(s_deviceB, s_contextB, s_overlayHwnd, s_leiaSrcSRV)) {
                     s_contextB->OMSetRenderTargets(1, &s_backBufRTV, nullptr);

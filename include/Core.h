@@ -56,8 +56,12 @@ struct ID3D11RenderTargetView;
 // Stereo output mode (read from 3dvision4all.ini at init).
 
 enum class StereoMode {
-    SbsHalf = 0,        // W × H output; each half = one eye (3DTV SbS input,
-                        //                                   AR-glasses 32:9 panel)
+    Sbs = 0,            // Side-by-side. Each half of the output is one eye.
+                        // Covers 3DTV SbS-in mode, AR-glasses 32:9 panels
+                        // (Xreal/Viture/Rokid), and "full-SbS" if the game
+                        // is rendering at half the panel width via the
+                        // [render] override (so the upscale to panel-native
+                        // produces a true 2W×H per-eye signal).
     Tab,                // W × H output; top half = L, bottom half = R
     RowInterlaced,      // W × H output; even rows = L, odd rows = R
     ColumnInterlaced,   // W × H output; even cols = L, odd cols = R
@@ -66,15 +70,17 @@ enum class StereoMode {
 };
 
 struct Config {
-    StereoMode mode = StereoMode::SbsHalf;
+    StereoMode mode = StereoMode::Sbs;
 
-    // Reverse-stereo-blit captures (and Direct Mode SetActiveEye copies)
-    // hand us right-view on the left half and left-view on the right half
-    // of the 2W×H staging. Default ON undoes that so every downstream
-    // consumer (compose shader, LeiaSR weaver) reads L on left, R on right.
-    // Set to 0 in the rare case where the game's stereo already comes back
-    // in natural order.
-    bool       swap_eyes = true;
+    // INI knob "swap_eyes" — request an EXTRA swap on top of the default
+    // capture-side fixup. The default capture-side path already swaps the
+    // halves to undo the reverse-stereo-blit's right-on-left layout, so
+    // swap_eyes=0 (default) produces natural L-on-left output for every
+    // downstream consumer (compose shader, LeiaSR weaver). Set to 1 only
+    // in the rare case where the game's stereo capture is ALREADY in
+    // natural order, in which case the default fix would reverse them and
+    // this knob cancels it back out.
+    bool       swap_eyes = false;
 
     wchar_t    log_path[MAX_PATH] = L"";
     int        log_level = 1; // 0=off, 1=info, 2=verbose

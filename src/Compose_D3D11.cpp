@@ -64,7 +64,7 @@ static const char kHLSL_VS[] =
 // be undefined or zero, and a zero alpha can cause DWM to composite our
 // overlay as transparent even with DXGI_ALPHA_MODE_IGNORE on some paths.
 
-static const char kHLSL_SbsHalf[] =
+static const char kHLSL_Sbs[] =
     "Texture2D    s0 : register(t0);\n"
     "SamplerState ss : register(s0);\n"
     "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
@@ -122,12 +122,12 @@ static const char kHLSL_Checkerboard[] =
 static const char* HlslForMode(StereoMode m)
 {
     switch (m) {
-    case StereoMode::SbsHalf:          return kHLSL_SbsHalf;
+    case StereoMode::Sbs:              return kHLSL_Sbs;
     case StereoMode::Tab:              return kHLSL_Tab;
     case StereoMode::RowInterlaced:    return kHLSL_RowInterlaced;
     case StereoMode::ColumnInterlaced: return kHLSL_ColumnInterlaced;
     case StereoMode::Checkerboard:     return kHLSL_Checkerboard;
-    default:                            return kHLSL_SbsHalf;
+    default:                            return kHLSL_Sbs;
     }
 }
 

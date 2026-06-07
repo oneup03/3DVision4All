@@ -209,16 +209,21 @@ static void ReleaseStereoStage()
 
 
 // Copy the non-shared 2W×H capture into the shared 2W×H texture for
-// Device B. When swap_eyes is on, swap the L/R halves during this copy so
-// every consumer downstream (compose shader and the LeiaSR weaver alike)
-// reads L-view on the left and R-view on the right. Doing the swap here
-// means swap_eyes works uniformly across all output modes — including
-// LeiaSR, which doesn't go through our compose shader.
+// Device B. The reverse-stereo-blit capture path hands us R-view on the
+// left half and L-view on the right; the default code path here swaps the
+// halves during this copy so every consumer downstream (compose shader
+// and the LeiaSR weaver alike) reads L on the left and R on the right.
+// Doing the swap here means the fix lands uniformly across all output
+// modes — including LeiaSR, which doesn't go through our compose shader.
+//
+// The INI knob "swap_eyes" CANCELS this default swap for the rare game
+// whose capture already comes back in natural order (then the default
+// swap would reverse them, and swap_eyes=1 puts them back).
 static void CopyStageToShared_MaybeSwap(IDirect3DDevice9* device)
 {
     if (!g_stereoStage || !g_sharedSurface) return;
 
-    if (!g_config.swap_eyes) {
+    if (g_config.swap_eyes) {
         device->StretchRect(g_stereoStage, nullptr, g_sharedSurface, nullptr, D3DTEXF_NONE);
         return;
     }

@@ -50,13 +50,13 @@ static void ResolveRelativePath(const wchar_t* in, wchar_t out[MAX_PATH])
 
 static StereoMode ParseMode(const wchar_t* s)
 {
-    if (_wcsicmp(s, L"sbs_half")          == 0) return StereoMode::SbsHalf;
+    if (_wcsicmp(s, L"sbs")               == 0) return StereoMode::Sbs;
     if (_wcsicmp(s, L"tab")               == 0) return StereoMode::Tab;
     if (_wcsicmp(s, L"row_interlaced")    == 0) return StereoMode::RowInterlaced;
     if (_wcsicmp(s, L"column_interlaced") == 0) return StereoMode::ColumnInterlaced;
     if (_wcsicmp(s, L"checkerboard")      == 0) return StereoMode::Checkerboard;
     if (_wcsicmp(s, L"leiasr")            == 0) return StereoMode::LeiaSR;
-    return StereoMode::SbsHalf;
+    return StereoMode::Sbs;
 }
 
 
@@ -67,12 +67,12 @@ void Config_Load(Config& cfg)
 
     wchar_t buf[MAX_PATH];
 
-    GetPrivateProfileStringW(L"stereo", L"mode", L"sbs_half", buf, _countof(buf), iniPath);
+    GetPrivateProfileStringW(L"stereo", L"mode", L"sbs", buf, _countof(buf), iniPath);
     cfg.mode = ParseMode(buf);
 
-    cfg.swap_eyes = GetPrivateProfileIntW(L"stereo", L"swap_eyes", 1, iniPath) != 0;
+    cfg.swap_eyes = GetPrivateProfileIntW(L"stereo", L"swap_eyes", 0, iniPath) != 0;
 
-    cfg.defeat_directflip = GetPrivateProfileIntW(L"stereo", L"defeat_directflip", 1, iniPath);
+    cfg.defeat_directflip = GetPrivateProfileIntW(L"render", L"defeat_directflip", 1, iniPath);
 
     cfg.render_width  = (UINT)GetPrivateProfileIntW(L"render", L"render_width",  0, iniPath);
     cfg.render_height = (UINT)GetPrivateProfileIntW(L"render", L"render_height", 0, iniPath);
