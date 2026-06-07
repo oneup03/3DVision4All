@@ -56,8 +56,8 @@ struct ID3D11RenderTargetView;
 // Stereo output mode (read from 3dvision4all.ini at init).
 
 enum class StereoMode {
-    SbsHalf = 0,        // W × H output; each half = one eye (3DTV SbS input)
-    SbsFull,            // 2W × H output; AR-glasses with 32:9 native panel
+    SbsHalf = 0,        // W × H output; each half = one eye (3DTV SbS input,
+                        //                                   AR-glasses 32:9 panel)
     Tab,                // W × H output; top half = L, bottom half = R
     RowInterlaced,      // W × H output; even rows = L, odd rows = R
     ColumnInterlaced,   // W × H output; even cols = L, odd cols = R
@@ -79,12 +79,6 @@ struct Config {
     wchar_t    log_path[MAX_PATH] = L"";
     int        log_level = 1; // 0=off, 1=info, 2=verbose
 
-    // Optional per-eye dimensions for AR-glasses targets (sbs_full mode).
-    // Zero = no override (game renders at its default backbuffer dims).
-    UINT       ar_per_eye_width  = 0;
-    UINT       ar_per_eye_height = 0;
-    int        ar_monitor_index  = 0;  // 0 = same monitor as game; 1+ = pick another
-
     // Add WS_EX_LAYERED + LWA_ALPHA(255) to the GAME's window after
     // CreateDevice/Reset. DWM can't DirectFlip a layered window's swap
     // chain, so this forces composition through the redirection surface —
@@ -92,6 +86,23 @@ struct Config {
     // Default ON because most fullscreen-borderless DX9 games go into
     // DirectFlip and the overlay is invisible without this.
     int        defeat_directflip = 1;
+
+    // Optional: stamp this into the game's CreateDevice/Reset present params.
+    // 0,0 = leave the game's requested BackBufferWidth/Height alone (still
+    // force windowed). The overlay always upscales the captured staging to
+    // the panel's native resolution via the compose shader's linear sampler,
+    // so interlaced / checkerboard / LeiaSR patterns line up pixel-perfectly
+    // regardless of the game's render resolution.
+    //
+    // Defaults to OFF because many games (notably UE3-derived titles such
+    // as Brothers - A Tale of Two Sons) cache their viewport / projection
+    // matrix from their requested resolution and don't re-query the BB after
+    // CreateDevice returns. Forcing a smaller BB on those games clips their
+    // render to the top-left of the BB — visible as "only the top-left
+    // quarter of the game world is rendered" across every stereo mode.
+    // Set non-zero only if you've confirmed the specific game cooperates.
+    UINT       render_width  = 0;
+    UINT       render_height = 0;
 };
 
 
@@ -120,6 +131,12 @@ void Log_Fatal(const wchar_t* msg, HRESULT code);
 
 #define KLOG(fmt, ...)  do { Log_Write(fmt, ##__VA_ARGS__); } while (0)
 
+// Verbose-only log line. Compiled in, but writes only when
+// [debug] log_level >= 2 in the INI. Use for high-frequency hooks
+// (display-mode probes that fire hundreds of times per second) so the
+// default log_level=1 install gets a readable log without spam.
+#define KLOG_V(fmt, ...) do { if (g_config.log_level >= 2) Log_Write(fmt, ##__VA_ARGS__); } while (0)
+
 
 // --------------------------------------------------------------------------
 // Config — defined in Config.cpp.
@@ -132,11 +149,25 @@ void Config_Load(Config& cfg);
 
 void DX9_InstallHooks();
 
+// Install the CreateDevice + display-mode-enumeration vtable hooks on an
+// IDirect3D9Ex returned by some real-export-side path (e.g. the
+// Proxy_Direct3DCreate9Ex export below). Idempotent.
+void DX9_InstallVtableHooksOn(IDirect3D9Ex* pDX9Ex);
+
 
 // --------------------------------------------------------------------------
 // NvAPI SetDriverMode hook — defined in Init.cpp.
 
 void NvApi_HookSetDriverMode();
+
+
+// --------------------------------------------------------------------------
+// Win32 display-mode enumeration hooks — defined in Init.cpp. When
+// render_width/height are both non-zero, these lie to the game about the
+// desktop resolution. Active only on demand; transparent pass-through when
+// the override is off.
+
+void Win32_HookDisplayModeApis();
 
 
 // --------------------------------------------------------------------------
@@ -149,7 +180,8 @@ void Compose_D3D11_Run(ID3D11Device*             device,
                        ID3D11DeviceContext*      ctx,
                        ID3D11ShaderResourceView* stagingSRV,
                        ID3D11RenderTargetView*   backBufRTV,
-                       UINT outW, UINT outH);
+                       UINT outW, UINT outH,
+                       StereoMode mode);
 
 void Compose_D3D11_Release();
 
@@ -190,6 +222,9 @@ extern HWND   g_gameFocusHwnd;
 // compiled as straight C using CINTERFACE.
 
 extern "C" LPVOID lpvtbl_CreateDevice(IDirect3D9* pDX9);
+extern "C" LPVOID lpvtbl_GetAdapterDisplayMode(IDirect3D9* pDX9);
+extern "C" LPVOID lpvtbl_EnumAdapterModes(IDirect3D9* pDX9);
+extern "C" LPVOID lpvtbl_GetAdapterModeCount(IDirect3D9* pDX9);
 extern "C" LPVOID lpvtbl_Present_DX9(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_Reset(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateTexture(IDirect3DDevice9* pDX9Device);

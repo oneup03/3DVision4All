@@ -45,6 +45,27 @@ LPVOID lpvtbl_CreateDevice(IDirect3D9* pDX9)
     return pDX9->lpVtbl->CreateDevice;
 }
 
+LPVOID lpvtbl_GetAdapterDisplayMode(IDirect3D9* pDX9)
+{
+    if (!pDX9)
+        return NULL;
+    return pDX9->lpVtbl->GetAdapterDisplayMode;
+}
+
+LPVOID lpvtbl_EnumAdapterModes(IDirect3D9* pDX9)
+{
+    if (!pDX9)
+        return NULL;
+    return pDX9->lpVtbl->EnumAdapterModes;
+}
+
+LPVOID lpvtbl_GetAdapterModeCount(IDirect3D9* pDX9)
+{
+    if (!pDX9)
+        return NULL;
+    return pDX9->lpVtbl->GetAdapterModeCount;
+}
+
 LPVOID lpvtbl_Present_DX9(IDirect3DDevice9* pDX9Device)
 {
     if (!pDX9Device)

@@ -70,12 +70,6 @@ static const char kHLSL_SbsHalf[] =
     "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
     "{ return float4(s0.Sample(ss, uv).rgb, 1.0); }\n";
 
-static const char kHLSL_SbsFull[] =
-    "Texture2D    s0 : register(t0);\n"
-    "SamplerState ss : register(s0);\n"
-    "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
-    "{ return float4(s0.Sample(ss, uv).rgb, 1.0); }\n";
-
 static const char kHLSL_Tab[] =
     "Texture2D    s0 : register(t0);\n"
     "SamplerState ss : register(s0);\n"
@@ -129,7 +123,6 @@ static const char* HlslForMode(StereoMode m)
 {
     switch (m) {
     case StereoMode::SbsHalf:          return kHLSL_SbsHalf;
-    case StereoMode::SbsFull:          return kHLSL_SbsFull;
     case StereoMode::Tab:              return kHLSL_Tab;
     case StereoMode::RowInterlaced:    return kHLSL_RowInterlaced;
     case StereoMode::ColumnInterlaced: return kHLSL_ColumnInterlaced;
@@ -265,12 +258,13 @@ void Compose_D3D11_Run(ID3D11Device*             device,
                        ID3D11DeviceContext*      ctx,
                        ID3D11ShaderResourceView* stagingSRV,
                        ID3D11RenderTargetView*   backBufRTV,
-                       UINT outW, UINT outH)
+                       UINT outW, UINT outH,
+                       StereoMode mode)
 {
     if (!device || !ctx || !stagingSRV || !backBufRTV) return;
 
     ID3D11VertexShader*    vs  = EnsureVS(device);
-    ID3D11PixelShader*     ps  = EnsurePS(device, g_config.mode);
+    ID3D11PixelShader*     ps  = EnsurePS(device, mode);
     ID3D11SamplerState*    smp = EnsureSampler(device);
     ID3D11Buffer*          cb  = EnsureCBuf(device);
     ID3D11RasterizerState* rs  = EnsureRS(device);

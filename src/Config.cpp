@@ -51,7 +51,6 @@ static void ResolveRelativePath(const wchar_t* in, wchar_t out[MAX_PATH])
 static StereoMode ParseMode(const wchar_t* s)
 {
     if (_wcsicmp(s, L"sbs_half")          == 0) return StereoMode::SbsHalf;
-    if (_wcsicmp(s, L"sbs_full")          == 0) return StereoMode::SbsFull;
     if (_wcsicmp(s, L"tab")               == 0) return StereoMode::Tab;
     if (_wcsicmp(s, L"row_interlaced")    == 0) return StereoMode::RowInterlaced;
     if (_wcsicmp(s, L"column_interlaced") == 0) return StereoMode::ColumnInterlaced;
@@ -73,11 +72,10 @@ void Config_Load(Config& cfg)
 
     cfg.swap_eyes = GetPrivateProfileIntW(L"stereo", L"swap_eyes", 1, iniPath) != 0;
 
-    cfg.ar_per_eye_width  = (UINT)GetPrivateProfileIntW(L"stereo", L"ar_per_eye_width",  0, iniPath);
-    cfg.ar_per_eye_height = (UINT)GetPrivateProfileIntW(L"stereo", L"ar_per_eye_height", 0, iniPath);
-    cfg.ar_monitor_index  =      GetPrivateProfileIntW(L"stereo", L"ar_monitor_index",  0, iniPath);
-
     cfg.defeat_directflip = GetPrivateProfileIntW(L"stereo", L"defeat_directflip", 1, iniPath);
+
+    cfg.render_width  = (UINT)GetPrivateProfileIntW(L"render", L"render_width",  0, iniPath);
+    cfg.render_height = (UINT)GetPrivateProfileIntW(L"render", L"render_height", 0, iniPath);
 
     wchar_t logRel[MAX_PATH] = L"";
     GetPrivateProfileStringW(L"debug", L"log_file", L"3dvision4all.log",

@@ -58,10 +58,20 @@ HWND   g_gameFocusHwnd       = nullptr;
 
 // Hook trampolines — set by g_nktInProc.Hook().
 static IDirect3D9* (__stdcall *pOrigDirect3DCreate9)(UINT SDKVersion) = nullptr;
+static HRESULT     (__stdcall *pOrigDirect3DCreate9Ex)(UINT SDKVersion, IDirect3D9Ex** ppDX9Ex) = nullptr;
 
 static HRESULT (__stdcall *pOrigCreateDevice)(
     IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD,
     D3DPRESENT_PARAMETERS*, IDirect3DDevice9**) = nullptr;
+
+static HRESULT (__stdcall *pOrigGetAdapterDisplayMode)(
+    IDirect3D9*, UINT, D3DDISPLAYMODE*) = nullptr;
+
+static HRESULT (__stdcall *pOrigEnumAdapterModes)(
+    IDirect3D9*, UINT, D3DFORMAT, UINT, D3DDISPLAYMODE*) = nullptr;
+
+static UINT    (__stdcall *pOrigGetAdapterModeCount)(
+    IDirect3D9*, UINT, D3DFORMAT) = nullptr;
 
 static HRESULT (__stdcall *pOrigPresent)(
     IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*) = nullptr;
@@ -229,6 +239,71 @@ static void CopyStageToShared_MaybeSwap(IDirect3DDevice9* device)
 
 
 // --------------------------------------------------------------------------
+// Force the game into windowed mode at the configured render resolution.
+// The overlay's compose shader linearly upscales to panel-native res — this
+// is what makes interlaced / checkerboard / LeiaSR patterns align with the
+// physical pixel grid even when the game wanted to render at the panel's
+// full native resolution.
+//
+// Windowed=TRUE requires FullScreen_RefreshRateInHz=0; DX9 will reject
+// non-zero refresh in windowed mode. PresentationInterval is left alone.
+static void ApplyPresentParamOverrides(D3DPRESENT_PARAMETERS* pp)
+{
+    if (!pp) return;
+    pp->Windowed                   = TRUE;
+    pp->FullScreen_RefreshRateInHz = 0;
+    if (g_config.render_width > 0 && g_config.render_height > 0) {
+        pp->BackBufferWidth  = g_config.render_width;
+        pp->BackBufferHeight = g_config.render_height;
+    }
+}
+
+
+static bool ResOverrideActive()
+{
+    return g_config.render_width > 0 && g_config.render_height > 0;
+}
+
+
+// When the render override is active, the game's BB is smaller than the
+// monitor and most games keep their HWND at the BB size — landing the
+// HWND in the top-left corner of the panel. The overlay (HTTRANSPARENT)
+// covers the whole monitor, so clicks at the perceived position on the
+// upscaled overlay fall through the overlay to the desktop instead of
+// the tiny game HWND. Resizing the HWND to fill the monitor makes those
+// clicks land in the game's client area. Well-behaved games scale mouse
+// coords by client_width / world_width, so a 4K HWND with a 1080p
+// internal world produces the matching divisor.
+//
+// Only fires when render override is on. Without override the HWND is
+// already monitor-sized and re-asserting it is unnecessary.
+static void MaybeResizeGameHwndToMonitor(HWND hwnd)
+{
+    if (!hwnd || !ResOverrideActive()) return;
+
+    HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hMon, &mi)) return;
+
+    int x = mi.rcMonitor.left;
+    int y = mi.rcMonitor.top;
+    int w = mi.rcMonitor.right  - mi.rcMonitor.left;
+    int h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+
+    RECT cur = {};
+    GetWindowRect(hwnd, &cur);
+    if (cur.left == x && cur.top == y &&
+        (cur.right - cur.left) == w && (cur.bottom - cur.top) == h)
+        return;  // already covers the monitor — nothing to do
+
+    SetWindowPos(hwnd, nullptr, x, y, w, h,
+                 SWP_NOACTIVATE | SWP_NOZORDER);
+    KLOG(L"  resized game HWND %p to monitor rect (%d,%d) %dx%d\n", hwnd, x, y, w, h);
+}
+
+
+// --------------------------------------------------------------------------
 // Hooked Present — the SbS override happens here.
 
 static unsigned long s_frameCount = 0;
@@ -315,11 +390,20 @@ static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
 {
     KLOG(L"Hooked_Reset called\n");
     if (pPresentationParameters) {
-        KLOG(L"  %dx%d format=%d windowed=%d\n",
+        KLOG(L"  game asked: %dx%d format=%d windowed=%d\n",
              pPresentationParameters->BackBufferWidth,
              pPresentationParameters->BackBufferHeight,
              pPresentationParameters->BackBufferFormat,
              pPresentationParameters->Windowed);
+    }
+
+    ApplyPresentParamOverrides(pPresentationParameters);
+    if (pPresentationParameters) {
+        KLOG(L"  override:   %dx%d windowed=%d refresh=%d\n",
+             pPresentationParameters->BackBufferWidth,
+             pPresentationParameters->BackBufferHeight,
+             pPresentationParameters->Windowed,
+             pPresentationParameters->FullScreen_RefreshRateInHz);
     }
 
     ReleaseStereoStage();
@@ -335,6 +419,9 @@ static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
             KLOG(L"  Reset: re-applied WS_EX_LAYERED on game HWND %p\n", g_gameFocusHwnd);
         }
     }
+
+    // Reset can shrink the HWND back to the new BB size — re-assert.
+    MaybeResizeGameHwndToMonitor(g_gameFocusHwnd);
 
     return resetHr;
 }
@@ -404,6 +491,66 @@ static HRESULT __stdcall Hooked_CreateIndexBuffer(IDirect3DDevice9* This,
 
 
 // --------------------------------------------------------------------------
+// Display-mode enumeration hooks — lie to the game about what the desktop
+// resolution is and which modes are available, so games that auto-pick from
+// these APIs (instead of cooperating with BackBufferWidth/Height in their
+// CreateDevice request) get nudged toward our render_width/height.
+//
+// Active only when render_width × render_height are both non-zero. With
+// 0,0 (default), each hook is a transparent pass-through.
+//
+// UE3 family (Brothers - A Tale of Two Sons) reads a saved-config res but
+// then probes the desktop; if the desktop is larger, it ignores the config
+// and renders at the desktop. These hooks make the desktop "look smaller"
+// so UE3's probe sees the configured res and uses it.
+
+static HRESULT __stdcall Hooked_GetAdapterDisplayMode(IDirect3D9* This,
+                                                      UINT Adapter,
+                                                      D3DDISPLAYMODE* pMode)
+{
+    HRESULT hr = pOrigGetAdapterDisplayMode(This, Adapter, pMode);
+    if (SUCCEEDED(hr) && pMode && ResOverrideActive()) {
+        KLOG_V(L"Hooked_GetAdapterDisplayMode: %ux%u -> %ux%u (adapter=%u)\n",
+               pMode->Width, pMode->Height,
+               g_config.render_width, g_config.render_height, Adapter);
+        pMode->Width  = g_config.render_width;
+        pMode->Height = g_config.render_height;
+    }
+    return hr;
+}
+
+static UINT __stdcall Hooked_GetAdapterModeCount(IDirect3D9* This,
+                                                  UINT Adapter,
+                                                  D3DFORMAT Format)
+{
+    UINT count = pOrigGetAdapterModeCount(This, Adapter, Format);
+    if (ResOverrideActive() && count > 0) {
+        KLOG_V(L"Hooked_GetAdapterModeCount: %u -> 1 (adapter=%u format=%d)\n",
+               count, Adapter, (int)Format);
+        return 1;
+    }
+    return count;
+}
+
+static HRESULT __stdcall Hooked_EnumAdapterModes(IDirect3D9* This,
+                                                  UINT Adapter,
+                                                  D3DFORMAT Format,
+                                                  UINT Mode,
+                                                  D3DDISPLAYMODE* pMode)
+{
+    HRESULT hr = pOrigEnumAdapterModes(This, Adapter, Format, Mode, pMode);
+    if (SUCCEEDED(hr) && pMode && ResOverrideActive()) {
+        KLOG_V(L"Hooked_EnumAdapterModes: idx=%u %ux%u -> %ux%u\n",
+               Mode, pMode->Width, pMode->Height,
+               g_config.render_width, g_config.render_height);
+        pMode->Width  = g_config.render_width;
+        pMode->Height = g_config.render_height;
+    }
+    return hr;
+}
+
+
+// --------------------------------------------------------------------------
 // Hooked CreateDevice — chains Present / Reset / Create* hooks off the
 // returned device.
 
@@ -414,12 +561,21 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
 {
     KLOG(L"Hooked_CreateDevice\n");
     if (pPresentationParameters) {
-        KLOG(L"  %dx%d format=%d windowed=%d swap_effect=%d\n",
+        KLOG(L"  game asked: %dx%d format=%d windowed=%d swap_effect=%d\n",
              pPresentationParameters->BackBufferWidth,
              pPresentationParameters->BackBufferHeight,
              pPresentationParameters->BackBufferFormat,
              pPresentationParameters->Windowed,
              pPresentationParameters->SwapEffect);
+    }
+
+    ApplyPresentParamOverrides(pPresentationParameters);
+    if (pPresentationParameters) {
+        KLOG(L"  override:   %dx%d windowed=%d refresh=%d\n",
+             pPresentationParameters->BackBufferWidth,
+             pPresentationParameters->BackBufferHeight,
+             pPresentationParameters->Windowed,
+             pPresentationParameters->FullScreen_RefreshRateInHz);
     }
 
     // Capture the focus HWND for the overlay-window output path. Prefer
@@ -458,6 +614,8 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
             KLOG(L"  defeat_directflip: added WS_EX_LAYERED on game HWND %p\n", g_gameFocusHwnd);
         }
     }
+
+    MaybeResizeGameHwndToMonitor(g_gameFocusHwnd);
 
     if (pOrigPresent == nullptr && pDevice9) {
         SIZE_T hook_id = 0;
@@ -503,6 +661,48 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
 }
 
 
+// Install the CreateDevice + display-mode-enumeration vtable hooks on the
+// returned IDirect3D9Ex object. Idempotent — guarded by pOrigCreateDevice so
+// the second caller (whichever of Direct3DCreate9 / Direct3DCreate9Ex runs
+// second) no-ops. Vtable address is shared between IDirect3D9 and
+// IDirect3D9Ex so the cast is safe.
+//
+// Exposed via Core.h as DX9_InstallVtableHooksOn so the proxy DLL's real
+// Direct3DCreate9 / Direct3DCreate9Ex exports can install our hooks on the
+// object before handing it back to the EXE.
+void DX9_InstallVtableHooksOn(IDirect3D9Ex* pDX9Ex)
+{
+    if (pOrigCreateDevice != nullptr || !pDX9Ex) return;
+
+    SIZE_T hook_id = 0;
+    DWORD dwOsErr;
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateDevice,
+                               lpvtbl_CreateDevice((IDirect3D9*)pDX9Ex),
+                               Hooked_CreateDevice, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook IDirect3D9::CreateDevice 0x%x\n", dwOsErr);
+    else                 KLOG(L"Hooked IDirect3D9::CreateDevice\n");
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterDisplayMode,
+                               lpvtbl_GetAdapterDisplayMode((IDirect3D9*)pDX9Ex),
+                               Hooked_GetAdapterDisplayMode, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterDisplayMode 0x%x\n", dwOsErr);
+    else                 KLOG(L"Hooked IDirect3D9::GetAdapterDisplayMode\n");
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigEnumAdapterModes,
+                               lpvtbl_EnumAdapterModes((IDirect3D9*)pDX9Ex),
+                               Hooked_EnumAdapterModes, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook EnumAdapterModes 0x%x\n", dwOsErr);
+    else                 KLOG(L"Hooked IDirect3D9::EnumAdapterModes\n");
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterModeCount,
+                               lpvtbl_GetAdapterModeCount((IDirect3D9*)pDX9Ex),
+                               Hooked_GetAdapterModeCount, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterModeCount 0x%x\n", dwOsErr);
+    else                 KLOG(L"Hooked IDirect3D9::GetAdapterModeCount\n");
+}
+
+
 // --------------------------------------------------------------------------
 // Hooked Direct3DCreate9 — quietly upgrades the game's IDirect3D9 to
 // IDirect3D9Ex. The returned Ex object is castable to plain IDirect3D9 from
@@ -513,25 +713,50 @@ static IDirect3D9* __stdcall Hooked_Direct3DCreate9(UINT SDKVersion)
 {
     KLOG(L"Hooked_Direct3DCreate9 SDK=%d\n", SDKVersion);
 
+    // Resolve Direct3DCreate9Ex from system d3d9.dll via GetProcAddress
+    // rather than linking d3d9.lib for it. Linking the import conflicts
+    // with our proxy DLL's exported Proxy_Direct3DCreate9Ex (which is
+    // /EXPORT'd under the same name) — MSVC can't simultaneously import
+    // and export the same symbol cleanly.
+    typedef HRESULT (WINAPI *t_Direct3DCreate9Ex)(UINT, IDirect3D9Ex**);
+    static t_Direct3DCreate9Ex pSysCreate9Ex = nullptr;
+    if (!pSysCreate9Ex) {
+        wchar_t path[MAX_PATH] = L"";
+        GetSystemDirectoryW(path, MAX_PATH);
+        wcscat_s(path, MAX_PATH, L"\\d3d9.dll");
+        HMODULE h = LoadLibraryW(path);
+        if (h) pSysCreate9Ex = (t_Direct3DCreate9Ex)GetProcAddress(h, "Direct3DCreate9Ex");
+    }
+
     IDirect3D9Ex* pDX9Ex = nullptr;
-    HRESULT hr = Direct3DCreate9Ex(SDKVersion, &pDX9Ex);
+    HRESULT hr = pSysCreate9Ex ? pSysCreate9Ex(SDKVersion, &pDX9Ex) : E_FAIL;
     if (FAILED(hr) || !pDX9Ex) {
         KLOG(L"  Direct3DCreate9Ex failed hr=0x%x, falling back to plain DX9\n", hr);
         return pOrigDirect3DCreate9(SDKVersion);
     }
 
-    // Hook CreateDevice on the Ex object (vtable address is shared with
-    // plain IDirect3D9 so cast is safe).
-    if (pOrigCreateDevice == nullptr) {
-        SIZE_T hook_id = 0;
-        DWORD dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateDevice,
-                                         lpvtbl_CreateDevice((IDirect3D9*)pDX9Ex),
-                                         Hooked_CreateDevice, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook IDirect3D9::CreateDevice 0x%x\n", dwOsErr);
-        else                 KLOG(L"Hooked IDirect3D9::CreateDevice\n");
-    }
-
+    DX9_InstallVtableHooksOn(pDX9Ex);
     return (IDirect3D9*)pDX9Ex;
+}
+
+
+// Hooked Direct3DCreate9Ex — the game already wants Ex, so just chain
+// through and install our vtable hooks on the returned object. Required
+// for games that go straight to Ex (modern DX9 titles) and for games whose
+// EXE import table has been patched to pull D3D9 through a side DLL like
+// our DSOUND proxy — that path resolves to a real Direct3DCreate9Ex call
+// on either system d3d9 or a game-folder d3d9 wrapper (e.g. HelixMod),
+// and we want our trampoline either way.
+static HRESULT __stdcall Hooked_Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex** ppDX9Ex)
+{
+    KLOG(L"Hooked_Direct3DCreate9Ex SDK=%d\n", SDKVersion);
+    HRESULT hr = pOrigDirect3DCreate9Ex(SDKVersion, ppDX9Ex);
+    if (FAILED(hr) || !ppDX9Ex || !*ppDX9Ex) {
+        KLOG(L"  Direct3DCreate9Ex failed hr=0x%x\n", hr);
+        return hr;
+    }
+    DX9_InstallVtableHooksOn(*ppDX9Ex);
+    return hr;
 }
 
 
@@ -555,22 +780,37 @@ void DX9_InstallHooks()
     }
     KLOG(L"DX9_InstallHooks: loaded %s @ %p\n", d3d9Path, hSystemD3D9);
 
-    FARPROC sysDirect3DCreate9 = GetProcAddress(hSystemD3D9, "Direct3DCreate9");
-    if (!sysDirect3DCreate9) {
-        KLOG(L"DX9_InstallHooks: Direct3DCreate9 not found err=0x%x\n", GetLastError());
+    FARPROC sysDirect3DCreate9   = GetProcAddress(hSystemD3D9, "Direct3DCreate9");
+    FARPROC sysDirect3DCreate9Ex = GetProcAddress(hSystemD3D9, "Direct3DCreate9Ex");
+    if (!sysDirect3DCreate9 || !sysDirect3DCreate9Ex) {
+        KLOG(L"DX9_InstallHooks: Direct3DCreate9 (%p) or 9Ex (%p) not found\n",
+             sysDirect3DCreate9, sysDirect3DCreate9Ex);
         return;
     }
 
-    if (pOrigDirect3DCreate9 != nullptr)
+    if (pOrigDirect3DCreate9 != nullptr && pOrigDirect3DCreate9Ex != nullptr)
         return;  // already hooked
 
     SIZE_T hook_id = 0;
-    DWORD dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigDirect3DCreate9,
-                                     sysDirect3DCreate9, Hooked_Direct3DCreate9, 0);
-    if (FAILED(dwOsErr)) {
-        KLOG(L"DX9_InstallHooks: Hook(Direct3DCreate9) failed 0x%x\n", dwOsErr);
-        return;
+    DWORD dwOsErr;
+
+    if (pOrigDirect3DCreate9 == nullptr) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigDirect3DCreate9,
+                                   sysDirect3DCreate9, Hooked_Direct3DCreate9, 0);
+        if (FAILED(dwOsErr)) {
+            KLOG(L"DX9_InstallHooks: Hook(Direct3DCreate9) failed 0x%x\n", dwOsErr);
+        } else {
+            KLOG(L"DX9_InstallHooks: hooked Direct3DCreate9 @ %p\n", sysDirect3DCreate9);
+        }
     }
 
-    KLOG(L"DX9_InstallHooks: hooked Direct3DCreate9 @ %p\n", sysDirect3DCreate9);
+    if (pOrigDirect3DCreate9Ex == nullptr) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigDirect3DCreate9Ex,
+                                   sysDirect3DCreate9Ex, Hooked_Direct3DCreate9Ex, 0);
+        if (FAILED(dwOsErr)) {
+            KLOG(L"DX9_InstallHooks: Hook(Direct3DCreate9Ex) failed 0x%x\n", dwOsErr);
+        } else {
+            KLOG(L"DX9_InstallHooks: hooked Direct3DCreate9Ex @ %p\n", sysDirect3DCreate9Ex);
+        }
+    }
 }

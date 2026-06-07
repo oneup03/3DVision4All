@@ -71,6 +71,19 @@ static ID3D11Texture2D*           s_sharedTex   = nullptr;
 static ID3D11ShaderResourceView*  s_sharedSRV   = nullptr;
 static HANDLE                     s_openedHandle = nullptr;
 
+// Panel-sized SbS intermediate for the LeiaSR path. The SR weaver does NOT
+// auto-upscale in our DX11 build of SDK 1.34.10 — it samples the input
+// texture at panel-pixel coordinates and writes to the bound RTV. Feeding it
+// the raw 2*gameW × gameH staging puts the image in the top-left of the
+// panel. So we run the SbsHalf compose shader (linear sampler) into a
+// panel-sized SbS intermediate first, then hand THAT to the weaver. Each
+// half is panelW/2 × panelH, so per-eye = (panelW/2, panelH) lines up with
+// what the wrapper now reports via setInputViewTexture(tex_desc.Width / 2,
+// tex_desc.Height, ...).
+static ID3D11Texture2D*           s_leiaSrcTex  = nullptr;
+static ID3D11ShaderResourceView*  s_leiaSrcSRV  = nullptr;
+static ID3D11RenderTargetView*    s_leiaSrcRTV  = nullptr;
+
 static const wchar_t kOverlayClassName[] = L"Stereo3D_OverlayWindow";
 static ATOM         s_classAtom          = 0;
 
@@ -282,11 +295,56 @@ static bool EnsureStagingOnB()
 }
 
 
+// Lazy-create the LeiaSR upscale intermediate at panel-native SbS size
+// (s_bbWidth × s_bbHeight). Recreated if BB dims change.
+static bool EnsureLeiaSrcTexture()
+{
+    if (s_leiaSrcTex && s_leiaSrcSRV && s_leiaSrcRTV)
+        return true;
+    if (!s_deviceB || s_bbWidth == 0 || s_bbHeight == 0)
+        return false;
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width            = s_bbWidth;
+    td.Height           = s_bbHeight;
+    td.MipLevels        = 1;
+    td.ArraySize        = 1;
+    td.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;  // matches BB / staging
+    td.SampleDesc.Count = 1;
+    td.Usage            = D3D11_USAGE_DEFAULT;
+    td.BindFlags        = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    HRESULT hr = s_deviceB->CreateTexture2D(&td, nullptr, &s_leiaSrcTex);
+    if (FAILED(hr) || !s_leiaSrcTex) {
+        KLOG(L"Output_Overlay: LeiaSR intermediate CreateTexture2D hr=0x%x\n", hr);
+        return false;
+    }
+    hr = s_deviceB->CreateShaderResourceView(s_leiaSrcTex, nullptr, &s_leiaSrcSRV);
+    if (FAILED(hr) || !s_leiaSrcSRV) {
+        KLOG(L"Output_Overlay: LeiaSR intermediate CreateSRV hr=0x%x\n", hr);
+        s_leiaSrcTex->Release(); s_leiaSrcTex = nullptr;
+        return false;
+    }
+    hr = s_deviceB->CreateRenderTargetView(s_leiaSrcTex, nullptr, &s_leiaSrcRTV);
+    if (FAILED(hr) || !s_leiaSrcRTV) {
+        KLOG(L"Output_Overlay: LeiaSR intermediate CreateRTV hr=0x%x\n", hr);
+        s_leiaSrcSRV->Release(); s_leiaSrcSRV = nullptr;
+        s_leiaSrcTex->Release(); s_leiaSrcTex = nullptr;
+        return false;
+    }
+    KLOG(L"Output_Overlay: LeiaSR intermediate created %ux%u (per-eye %ux%u)\n",
+         s_bbWidth, s_bbHeight, s_bbWidth / 2, s_bbHeight);
+    return true;
+}
+
+
 static void ReleaseDeviceB()
 {
     // SR weaver holds D3D11 pointers — tear it down first.
     LeiaSR_Shutdown();
     Compose_D3D11_Release();
+    if (s_leiaSrcRTV) { s_leiaSrcRTV->Release(); s_leiaSrcRTV = nullptr; }
+    if (s_leiaSrcSRV) { s_leiaSrcSRV->Release(); s_leiaSrcSRV = nullptr; }
+    if (s_leiaSrcTex) { s_leiaSrcTex->Release(); s_leiaSrcTex = nullptr; }
     if (s_sharedSRV)  { s_sharedSRV->Release();  s_sharedSRV  = nullptr; }
     if (s_sharedTex)  { s_sharedTex->Release();  s_sharedTex  = nullptr; }
     if (s_backBufRTV) { s_backBufRTV->Release(); s_backBufRTV = nullptr; }
@@ -343,6 +401,12 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
         // alt-tabbed-to-other-apps don't sit behind a topmost stereo
         // composite. Comparing process IDs (not HWNDs) handles game-spawned
         // dialogs, Steam overlay in same process, etc.
+        //
+        // Re-assert HWND_TOPMOST every frame while shown. The transition-
+        // only call wasn't enough: some games call SetWindowPos /
+        // BringWindowToTop on their own HWND after gaining focus, which
+        // pushes our overlay below right after alt-tab. Re-asserting each
+        // frame is cheap (a few µs) and ironclad — same pattern RTSS uses.
         {
             static bool s_overlayShown = true;
             HWND fg = GetForegroundWindow();
@@ -351,29 +415,39 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
             bool wantShown = (fgPid == GetCurrentProcessId());
             if (wantShown != s_overlayShown) {
                 ShowWindow(s_overlayHwnd, wantShown ? SW_SHOWNA : SW_HIDE);
-                if (wantShown)
-                    SetWindowPos(s_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 s_overlayShown = wantShown;
             }
             if (!wantShown) continue;
+            SetWindowPos(s_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         if (!EnsureStagingOnB()) continue;
 
         bool didWeave = false;
         if (g_config.mode == StereoMode::LeiaSR) {
-            if (LeiaSR_TryInit(s_deviceB, s_contextB, s_overlayHwnd, s_sharedSRV)) {
-                s_contextB->OMSetRenderTargets(1, &s_backBufRTV, nullptr);
+            // Two-pass: upscale staging → panel-sized SbS intermediate via
+            // the SbsHalf passthrough shader (linear sampler does the
+            // stretch), then weave intermediate → BB. The weaver doesn't
+            // upscale on its own in our DX11 build.
+            if (EnsureLeiaSrcTexture()) {
                 D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)s_bbWidth, (float)s_bbHeight, 0.0f, 1.0f };
+                s_contextB->OMSetRenderTargets(1, &s_leiaSrcRTV, nullptr);
                 s_contextB->RSSetViewports(1, &vp);
-                LeiaSR_Weave();
-                didWeave = true;
+                Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_leiaSrcRTV,
+                                  s_bbWidth, s_bbHeight, StereoMode::SbsHalf);
+
+                if (LeiaSR_TryInit(s_deviceB, s_contextB, s_overlayHwnd, s_leiaSrcSRV)) {
+                    s_contextB->OMSetRenderTargets(1, &s_backBufRTV, nullptr);
+                    s_contextB->RSSetViewports(1, &vp);
+                    LeiaSR_Weave();
+                    didWeave = true;
+                }
             }
         }
         if (!didWeave) {
             Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_backBufRTV,
-                              s_bbWidth, s_bbHeight);
+                              s_bbWidth, s_bbHeight, g_config.mode);
         }
 
         HRESULT pr = s_swapChain->Present(1, 0);

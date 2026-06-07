@@ -112,9 +112,9 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
     KLOG(L"3DVision4All init thread started\n");
     KLOG(L"  mode          = %d\n", (int)g_config.mode);
     KLOG(L"  swap_eyes     = %d\n", g_config.swap_eyes ? 1 : 0);
-    KLOG(L"  ar_per_eye    = %ux%u (mon=%d)\n",
-         g_config.ar_per_eye_width, g_config.ar_per_eye_height, g_config.ar_monitor_index);
     KLOG(L"  defeat_directflip = %d\n", g_config.defeat_directflip);
+    KLOG(L"  render        = %ux%u (0,0 = no resolution override)\n",
+         g_config.render_width, g_config.render_height);
     KLOG(L"  log_path      = %s\n", g_config.log_path);
 
 #ifdef _DEBUG
@@ -123,9 +123,150 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
 
     DX9_InstallHooks();
     NvApi_HookSetDriverMode();
+    Win32_HookDisplayModeApis();
 
     KLOG(L"3DVision4All init thread complete\n");
     return 0;
+}
+
+
+// --------------------------------------------------------------------------
+// Win32 display-mode enumeration hooks. Lie to the game about the desktop
+// resolution when render_width/height are both non-zero. UE3 family games
+// (Brothers - A Tale of Two Sons) ignore their saved-config resolution and
+// probe the desktop via these APIs — making the desktop "look smaller"
+// here forces them to actually render at the configured size.
+
+typedef int  (WINAPI *t_GetSystemMetrics)(int);
+typedef BOOL (WINAPI *t_EnumDisplaySettingsW)(LPCWSTR, DWORD, DEVMODEW*);
+typedef BOOL (WINAPI *t_EnumDisplaySettingsA)(LPCSTR,  DWORD, DEVMODEA*);
+typedef int  (WINAPI *t_GetDeviceCaps)(HDC, int);
+
+static t_GetSystemMetrics     pOrigGetSystemMetrics     = nullptr;
+static t_EnumDisplaySettingsW pOrigEnumDisplaySettingsW = nullptr;
+static t_EnumDisplaySettingsA pOrigEnumDisplaySettingsA = nullptr;
+static t_GetDeviceCaps        pOrigGetDeviceCaps        = nullptr;
+
+static bool ResOverride() { return g_config.render_width > 0 && g_config.render_height > 0; }
+
+
+static int WINAPI Hooked_GetSystemMetrics(int nIndex)
+{
+    int val = pOrigGetSystemMetrics(nIndex);
+    if (!ResOverride()) return val;
+    switch (nIndex) {
+    case SM_CXSCREEN:
+    case SM_CXFULLSCREEN:
+    case SM_CXVIRTUALSCREEN:
+        KLOG_V(L"Hooked_GetSystemMetrics(%d): %d -> %u\n", nIndex, val, g_config.render_width);
+        return (int)g_config.render_width;
+    case SM_CYSCREEN:
+    case SM_CYFULLSCREEN:
+    case SM_CYVIRTUALSCREEN:
+        KLOG_V(L"Hooked_GetSystemMetrics(%d): %d -> %u\n", nIndex, val, g_config.render_height);
+        return (int)g_config.render_height;
+    }
+    return val;
+}
+
+
+// Both EnumDisplaySettings overrides leave non-resolution fields (refresh,
+// orientation, color depth, etc.) alone and only rewrite width/height. We
+// override for ANY iModeNum — including ENUM_CURRENT_SETTINGS (the "what
+// is the desktop right now" query that UE3 uses) and 0..N enumeration
+// callbacks.
+static BOOL WINAPI Hooked_EnumDisplaySettingsW(LPCWSTR lpszDeviceName,
+                                                DWORD iModeNum,
+                                                DEVMODEW* lpDevMode)
+{
+    BOOL ok = pOrigEnumDisplaySettingsW(lpszDeviceName, iModeNum, lpDevMode);
+    if (ok && lpDevMode && ResOverride()) {
+        KLOG_V(L"Hooked_EnumDisplaySettingsW(mode=0x%x): %ux%u -> %ux%u\n",
+               iModeNum, lpDevMode->dmPelsWidth, lpDevMode->dmPelsHeight,
+               g_config.render_width, g_config.render_height);
+        lpDevMode->dmPelsWidth  = g_config.render_width;
+        lpDevMode->dmPelsHeight = g_config.render_height;
+    }
+    return ok;
+}
+
+static BOOL WINAPI Hooked_EnumDisplaySettingsA(LPCSTR lpszDeviceName,
+                                                DWORD iModeNum,
+                                                DEVMODEA* lpDevMode)
+{
+    BOOL ok = pOrigEnumDisplaySettingsA(lpszDeviceName, iModeNum, lpDevMode);
+    if (ok && lpDevMode && ResOverride()) {
+        KLOG_V(L"Hooked_EnumDisplaySettingsA(mode=0x%x): %lux%lu -> %ux%u\n",
+               iModeNum, lpDevMode->dmPelsWidth, lpDevMode->dmPelsHeight,
+               g_config.render_width, g_config.render_height);
+        lpDevMode->dmPelsWidth  = g_config.render_width;
+        lpDevMode->dmPelsHeight = g_config.render_height;
+    }
+    return ok;
+}
+
+
+// GetDeviceCaps: HORZRES/VERTRES are logical pixels of the device. Many old
+// games use these to size their viewport. DESKTOPHORZRES/DESKTOPVERTRES
+// are the physical desktop size ignoring DPI scaling — also lied to so we
+// stay consistent.
+static int WINAPI Hooked_GetDeviceCaps(HDC hdc, int nIndex)
+{
+    int val = pOrigGetDeviceCaps(hdc, nIndex);
+    if (!ResOverride()) return val;
+    switch (nIndex) {
+    case HORZRES:
+    case DESKTOPHORZRES:
+        KLOG_V(L"Hooked_GetDeviceCaps(%d): %d -> %u\n", nIndex, val, g_config.render_width);
+        return (int)g_config.render_width;
+    case VERTRES:
+    case DESKTOPVERTRES:
+        KLOG_V(L"Hooked_GetDeviceCaps(%d): %d -> %u\n", nIndex, val, g_config.render_height);
+        return (int)g_config.render_height;
+    }
+    return val;
+}
+
+
+void Win32_HookDisplayModeApis()
+{
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    HMODULE hGdi32  = GetModuleHandleW(L"gdi32.dll");
+    if (!hUser32) hUser32 = LoadLibraryW(L"user32.dll");
+    if (!hGdi32)  hGdi32  = LoadLibraryW(L"gdi32.dll");
+
+    FARPROC pGSM = hUser32 ? GetProcAddress(hUser32, "GetSystemMetrics")     : nullptr;
+    FARPROC pEDW = hUser32 ? GetProcAddress(hUser32, "EnumDisplaySettingsW") : nullptr;
+    FARPROC pEDA = hUser32 ? GetProcAddress(hUser32, "EnumDisplaySettingsA") : nullptr;
+    FARPROC pGDC = hGdi32  ? GetProcAddress(hGdi32,  "GetDeviceCaps")        : nullptr;
+
+    SIZE_T hook_id = 0;
+    DWORD dwOsErr;
+
+    if (pGSM && !pOrigGetSystemMetrics) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetSystemMetrics,
+                                   pGSM, Hooked_GetSystemMetrics, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookDisplayModeApis: GetSystemMetrics hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookDisplayModeApis: hooked GetSystemMetrics @ %p\n", pGSM);
+    }
+    if (pEDW && !pOrigEnumDisplaySettingsW) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigEnumDisplaySettingsW,
+                                   pEDW, Hooked_EnumDisplaySettingsW, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookDisplayModeApis: EnumDisplaySettingsW hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookDisplayModeApis: hooked EnumDisplaySettingsW @ %p\n", pEDW);
+    }
+    if (pEDA && !pOrigEnumDisplaySettingsA) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigEnumDisplaySettingsA,
+                                   pEDA, Hooked_EnumDisplaySettingsA, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookDisplayModeApis: EnumDisplaySettingsA hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookDisplayModeApis: hooked EnumDisplaySettingsA @ %p\n", pEDA);
+    }
+    if (pGDC && !pOrigGetDeviceCaps) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetDeviceCaps,
+                                   pGDC, Hooked_GetDeviceCaps, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookDisplayModeApis: GetDeviceCaps hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookDisplayModeApis: hooked GetDeviceCaps @ %p\n", pGDC);
+    }
 }
 
 
