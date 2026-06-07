@@ -93,9 +93,12 @@ static ATOM         s_classAtom          = 0;
 
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    // WM_NCHITTEST = HTTRANSPARENT makes mouse input fall through to the
-    // window beneath us (the game). WM_MOUSEACTIVATE = MA_NOACTIVATE keeps
-    // clicks from stealing focus on the off chance they reach us.
+    // HTTRANSPARENT only routes hit-tests to underlying windows IN THE SAME
+    // THREAD. The real cross-thread / cross-process click-through is the
+    // WS_EX_LAYERED | WS_EX_TRANSPARENT combo on the window itself (set in
+    // CreateOverlayWindow). HTTRANSPARENT is kept as belt-and-suspenders for
+    // any message that does reach us. MA_NOACTIVATE blocks focus-steal on
+    // the off chance one slips through.
     if (msg == WM_NCHITTEST)    return HTTRANSPARENT;
     if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -111,7 +114,11 @@ static bool EnsureWindowClass(HMODULE hSelf)
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = OverlayWndProc;
     wc.hInstance     = hSelf ? hSelf : GetModuleHandleW(nullptr);
-    wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    // No class cursor — with WS_EX_LAYERED|WS_EX_TRANSPARENT the cursor
+    // falls through to the game, but a non-null class cursor would still get
+    // set as the OS arrow over us anyway. Leave nullptr so the game's cursor
+    // (whichever it set via SetCursor) is what's visible.
+    wc.hCursor       = nullptr;
     wc.hbrBackground = nullptr;
     wc.lpszClassName = kOverlayClassName;
 
@@ -144,8 +151,20 @@ static HWND CreateOverlayWindow(HMODULE hSelf, HWND gameHwnd)
     int w = mr.right  - mr.left;
     int h = mr.bottom - mr.top;
 
+    // WS_EX_LAYERED | WS_EX_TRANSPARENT is THE pattern for a true
+    // cross-process click-through overlay. HTTRANSPARENT in the WndProc
+    // only routes through same-thread windows, so without these extended
+    // styles the game (different thread / different process) never sees
+    // our clicks and Windows insists on drawing OUR cursor over it.
+    //
+    // SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA) keeps the
+    // layered window fully opaque so our composed stereo output is
+    // visible. WS_EX_LAYERED + DXGI FLIP_DISCARD is supported on
+    // Win10 1809+ (user is on Win11) — DWM composites through the
+    // redirection surface, same as it does for the game window when
+    // defeat_directflip is on.
     HWND hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
         kOverlayClassName,
         L"3DVision4All overlay",
         WS_POPUP,
@@ -157,6 +176,8 @@ static HWND CreateOverlayWindow(HMODULE hSelf, HWND gameHwnd)
         KLOG(L"Output_Overlay: CreateWindowExW failed err=0x%x\n", GetLastError());
         return nullptr;
     }
+
+    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
 
     ShowWindow(hwnd, SW_SHOWNA);
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
