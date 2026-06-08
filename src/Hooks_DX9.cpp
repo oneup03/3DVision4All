@@ -395,6 +395,9 @@ static void ApplyPresentParamOverrides(D3DPRESENT_PARAMETERS* pp)
         pp->Windowed                   = TRUE;
         pp->FullScreen_RefreshRateInHz = 0;
     }
+    if (g_config.disable_vsync) {
+        pp->PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+    }
     if (s_viewportLockedFromInitialWindowed) return;
     if (g_config.render_width > 0 && g_config.render_height > 0) {
         pp->BackBufferWidth  = g_config.render_width;

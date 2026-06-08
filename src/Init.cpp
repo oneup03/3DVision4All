@@ -113,6 +113,7 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
     KLOG(L"  swap_eyes     = %d\n", g_config.swap_eyes ? 1 : 0);
     KLOG(L"  defeat_directflip = %d\n", g_config.defeat_directflip);
     KLOG(L"  force_windowed = %d\n", g_config.force_windowed);
+    KLOG(L"  disable_vsync = %d\n", g_config.disable_vsync);
     KLOG(L"  confine_cursor = %d\n", g_config.confine_cursor);
     KLOG(L"  hide_cursor    = %d\n", g_config.hide_cursor);
     KLOG(L"  install_device_hooks = %d\n", g_config.install_device_hooks);

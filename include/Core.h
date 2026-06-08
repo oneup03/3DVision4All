@@ -101,6 +101,16 @@ struct Config {
     // least the game launches.
     int        force_windowed = 1;
 
+    // Override pp->PresentationInterval to D3DPRESENT_INTERVAL_IMMEDIATE
+    // in CreateDevice/Reset. With NvAPI 3D Vision active the driver
+    // halves the present rate (frame-sequential stereo means each game
+    // frame becomes two driver frames), so vsync'd games at 60 Hz cap
+    // out at 30 fps. Disabling vsync at the wrapper layer lets the game
+    // render thread free-run. The overlay still goes through DWM and
+    // composes at refresh rate, so on-screen output stays smooth.
+    // Default 0 (respect the game's setting).
+    int        disable_vsync = 0;
+
     // Cursor confinement and visibility. The two knobs are independent:
     //
     // confine_cursor (default 0): ClipCursor the cursor to the game HWND

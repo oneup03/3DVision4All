@@ -76,6 +76,8 @@ void Config_Load(Config& cfg)
 
     cfg.force_windowed = GetPrivateProfileIntW(L"render", L"force_windowed", 1, iniPath);
 
+    cfg.disable_vsync = GetPrivateProfileIntW(L"render", L"disable_vsync", 0, iniPath);
+
     cfg.confine_cursor = GetPrivateProfileIntW(L"render", L"confine_cursor", 0, iniPath);
     cfg.hide_cursor    = GetPrivateProfileIntW(L"render", L"hide_cursor",    0, iniPath);
 
