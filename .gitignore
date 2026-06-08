@@ -16,9 +16,6 @@ obj/
 *.pdb
 *.exp
 
-# Visual Studio Code (optional per-user)
-.vscode/
-
 # Local test installs
 *.log
 3dvision4all.log
