@@ -71,15 +71,21 @@ static ID3D11Texture2D*           s_sharedTex   = nullptr;
 static ID3D11ShaderResourceView*  s_sharedSRV   = nullptr;
 static HANDLE                     s_openedHandle = nullptr;
 
-// Panel-sized SbS intermediate for the LeiaSR path. The SR weaver does NOT
+// Full-SbS intermediate for the LeiaSR path. The SR weaver does NOT
 // auto-upscale in our DX11 build of SDK 1.34.10 — it samples the input
-// texture at panel-pixel coordinates and writes to the bound RTV. Feeding it
-// the raw 2*gameW × gameH staging puts the image in the top-left of the
-// panel. So we run the Sbs compose shader (linear sampler) into a
-// panel-sized SbS intermediate first, then hand THAT to the weaver. Each
-// half is panelW/2 × panelH, so per-eye = (panelW/2, panelH) lines up with
-// what the wrapper now reports via setInputViewTexture(tex_desc.Width / 2,
-// tex_desc.Height, ...).
+// texture at panel-pixel coordinates and writes to the bound RTV.
+// Feeding it the raw 2*gameW × gameH staging puts the image in the
+// top-left of the panel. So we run the Sbs compose shader (linear
+// sampler) into a panel-sized intermediate first, then hand THAT to
+// the weaver.
+//
+// Dimensions: 2 × panelW × panelH — i.e. each eye in the SbS source is
+// (panelW × panelH), which is the "full-SbS" convention. The SR
+// wrapper's SetInputTexture passes the FULL combined width and height
+// to setInputViewTexture (see third_party/SR-lib/SR.cpp:235), and the
+// leiasr-integration skill recommends full-SbS — at panel-half rate
+// the weaver bilinear-upscales internally; with full-rate input it
+// samples per-eye-column 1:1.
 static ID3D11Texture2D*           s_leiaSrcTex  = nullptr;
 static ID3D11ShaderResourceView*  s_leiaSrcSRV  = nullptr;
 static ID3D11RenderTargetView*    s_leiaSrcRTV  = nullptr;
@@ -438,7 +444,7 @@ static bool EnsureLeiaSrcTexture()
         return false;
 
     D3D11_TEXTURE2D_DESC td = {};
-    td.Width            = s_bbWidth;
+    td.Width            = s_bbWidth * 2;   // full-SbS: 2 × panel width
     td.Height           = s_bbHeight;
     td.MipLevels        = 1;
     td.ArraySize        = 1;
@@ -464,8 +470,8 @@ static bool EnsureLeiaSrcTexture()
         s_leiaSrcTex->Release(); s_leiaSrcTex = nullptr;
         return false;
     }
-    KLOG(L"Output_Overlay: LeiaSR intermediate created %ux%u (per-eye %ux%u)\n",
-         s_bbWidth, s_bbHeight, s_bbWidth / 2, s_bbHeight);
+    KLOG(L"Output_Overlay: LeiaSR full-SbS intermediate created %ux%u (per-eye %ux%u)\n",
+         s_bbWidth * 2, s_bbHeight, s_bbWidth, s_bbHeight);
     return true;
 }
 
@@ -586,20 +592,24 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
 
         bool didWeave = false;
         if (g_config.mode == StereoMode::LeiaSR) {
-            // Two-pass: upscale staging → panel-sized SbS intermediate via
-            // the Sbs passthrough shader (linear sampler does the
-            // stretch), then weave intermediate → BB. The weaver doesn't
-            // upscale on its own in our DX11 build.
+            // Two-pass: upscale staging → full-SbS intermediate (2 × panel
+            // width × panel height) via the Sbs passthrough shader, then
+            // hand the intermediate's SRV to the weaver which writes the
+            // final woven output into the BB (panel dims). Compose
+            // viewport matches the intermediate (full-SbS); weave
+            // viewport matches the BB (panel).
             if (EnsureLeiaSrcTexture()) {
-                D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)s_bbWidth, (float)s_bbHeight, 0.0f, 1.0f };
+                D3D11_VIEWPORT vpFull  = { 0.0f, 0.0f, (float)(s_bbWidth * 2), (float)s_bbHeight, 0.0f, 1.0f };
+                D3D11_VIEWPORT vpPanel = { 0.0f, 0.0f, (float)s_bbWidth,       (float)s_bbHeight, 0.0f, 1.0f };
+
                 s_contextB->OMSetRenderTargets(1, &s_leiaSrcRTV, nullptr);
-                s_contextB->RSSetViewports(1, &vp);
+                s_contextB->RSSetViewports(1, &vpFull);
                 Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_leiaSrcRTV,
-                                  s_bbWidth, s_bbHeight, StereoMode::Sbs);
+                                  s_bbWidth * 2, s_bbHeight, StereoMode::Sbs);
 
                 if (LeiaSR_TryInit(s_deviceB, s_contextB, s_overlayHwnd, s_leiaSrcSRV)) {
                     s_contextB->OMSetRenderTargets(1, &s_backBufRTV, nullptr);
-                    s_contextB->RSSetViewports(1, &vp);
+                    s_contextB->RSSetViewports(1, &vpPanel);
                     LeiaSR_Weave();
                     didWeave = true;
                 }
