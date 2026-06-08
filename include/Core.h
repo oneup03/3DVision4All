@@ -172,6 +172,28 @@ struct Config {
     int        install_d3d9_vtable_hooks       = 1;
     int        install_d3d9_display_mode_hooks = 1;
 
+    // Per-eye downsample resolution for the cross-API staging texture.
+    // The staging is normally 2 × BB_width by BB_height — at 4K BB that's
+    // 7680x2160, ~66 MB. The CPU-readback path's GetRenderTargetData has
+    // to drain that surface each frame while holding the D3D9 device
+    // lock (D3DCREATE_MULTITHREADED), stalling the game's next
+    // StretchRect for ~16 ms and halving framerate.
+    //
+    // When BOTH per-eye dims are non-zero, the StretchRect into the
+    // staging downsamples on the GPU to (2*staging_per_eye_width,
+    // staging_per_eye_height), so the readback drains much faster.
+    // Each panel-half in the compose shader already gets resampled from
+    // (staging_width/2, staging_height) to panel-half, so as long as
+    // staging_per_eye_width is at least the panel-half width and
+    // staging_per_eye_height is at least the panel height, the cap is
+    // essentially lossless (e.g. on a 4K panel, 1920x2160 per eye is
+    // pixel-perfect; 1920x1080 trades half the vertical detail for a
+    // ~4× readback speedup).
+    //
+    // Default 0,0 = no cap.
+    UINT       staging_per_eye_width  = 0;
+    UINT       staging_per_eye_height = 0;
+
     // Optional: stamp this into the game's CreateDevice/Reset present
     // params, and feed the same dims back to display-mode probes
     // (GetSystemMetrics, EnumAdapterModes, GetDeviceCaps,

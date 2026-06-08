@@ -22,6 +22,8 @@
 
 #include "Core.h"
 
+#include <process.h>
+
 
 // Two-texture capture path. Collapsing these into a single surface
 // silently breaks the reverse-stereo-blit on at least some driver
@@ -40,15 +42,30 @@
 //     through to the CPU-readback path (see g_sysmemSurface below).
 static IDirect3DTexture9* g_stereoTex     = nullptr;
 static IDirect3DSurface9* g_stereoStage   = nullptr;
-static IDirect3DTexture9* g_sharedTex     = nullptr;
-static IDirect3DSurface9* g_sharedSurface = nullptr;
 
-// CPU-readback path (used when shared-handle creation is unavailable).
-// g_sysmemSurface is the SYSTEMMEM readback target of GetRenderTargetData
-// against g_sharedSurface. After Lock, its contents are memcpy'd into the
-// heap-allocated g_stagingCpuBuffer under g_stagingCpuLock, then
-// g_stagingCpuFresh is set so the overlay thread picks it up.
-static IDirect3DSurface9* g_sysmemSurface = nullptr;
+// Cross-API handoff surfaces. Double-buffered ONLY when on the CPU-readback
+// path: the slow GetRenderTargetData / Lock / memcpy chain runs on a
+// dedicated capture thread (see s_captureThread below), so the game's
+// Present thread can write the NEXT frame's stereo into the OTHER buffer
+// while the capture thread is still draining the previous one. The GPU
+// shared-handle path leaves index 1 nullptr and uses only index 0.
+static IDirect3DTexture9* g_sharedTex[2]     = { nullptr, nullptr };
+static IDirect3DSurface9* g_sharedSurface[2] = { nullptr, nullptr };
+static IDirect3DSurface9* g_sysmemSurface[2] = { nullptr, nullptr };
+static CRITICAL_SECTION   s_bufLock[2]       = {};
+static bool               s_bufLockInit      = false;
+
+// Capture-thread plumbing. The game thread publishes the index of the
+// buffer it just finished writing via s_pendingIdx and signals
+// s_captureEvent; the capture thread atomically takes the index and does
+// the GetRenderTargetData + Lock + memcpy out of band. s_lastProducedIdx
+// is the game thread's local "alternate from this next time" hint.
+static IDirect3DDevice9* s_captureDevice    = nullptr;
+static HANDLE            s_captureThread    = nullptr;
+static HANDLE            s_captureEvent     = nullptr;
+static volatile LONG     s_captureShutdown  = 0;
+static volatile LONG     s_lastProducedIdx  = 0;
+static volatile LONG     s_pendingIdx       = -1;
 
 // Published for Output_Overlay.cpp / Device B to pick up. Cleared on Reset.
 HANDLE g_stagingSharedHandle = nullptr;
@@ -117,6 +134,10 @@ static HRESULT (__stdcall *pOrigCreateIndexBuffer)(
 // first Present (or after Reset). Mirrors CreateSharedRenderTarget in the
 // original, but drops the shared-handle side.
 
+// Forward decl: capture thread proc, defined below.
+static unsigned __stdcall CaptureThreadProc(void* param);
+
+
 static void EnsureStereoStage(IDirect3DDevice9* device)
 {
     if (g_stereoStage)
@@ -141,121 +162,183 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
     UINT width  = desc.Width * 2;
     UINT height = desc.Height;
 
-    KLOG(L"EnsureStereoStage: %dx%d format=%d (two-texture: non-shared capture + shared handoff)\n",
-         width, height, desc.Format);
+    // Optional per-eye downsample into the shared / CPU staging path.
+    // g_stereoStage (the reverse-stereo-blit destination, in BB format)
+    // stays at the full 2W×H dims — NvAPI's reverse-blit destination has
+    // to match the BB. But the StretchRect into g_sharedSurface[] can
+    // downsample on the GPU, which is the cheap part; the downstream
+    // readback / upload pipeline then carries far fewer pixels. See the
+    // staging_per_eye_* comment in Core.h.
+    UINT stagingWidth  = width;
+    UINT stagingHeight = height;
+    if (g_config.staging_per_eye_width  > 0 &&
+        g_config.staging_per_eye_height > 0) {
+        UINT cw = g_config.staging_per_eye_width  * 2;
+        UINT ch = g_config.staging_per_eye_height;
+        if (cw < stagingWidth && ch < stagingHeight) {
+            stagingWidth  = cw & ~1U;          // keep even for the half-split math
+            stagingHeight = ch;
+        }
+    }
 
-    // 1) Non-shared RT — destination of reverse-stereo-blit.
+    KLOG(L"EnsureStereoStage: capture %ux%u format=%d, staging %ux%u\n",
+         width, height, desc.Format, stagingWidth, stagingHeight);
+
+    // 1) Non-shared RT — destination of reverse-stereo-blit, in the BB
+    // format. Single instance (the reverse-stereo-blit always lands here
+    // before we hand off to the shared/sysmem path).
     hr = device->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET,
                                desc.Format, D3DPOOL_DEFAULT,
                                &g_stereoTex, nullptr);
     if (FAILED(hr)) {
-        KLOG(L"EnsureStereoStage: CreateTexture(non-shared) failed hr=0x%x\n", hr);
+        KLOG(L"EnsureStereoStage: CreateTexture(stereoTex) failed hr=0x%x\n", hr);
         return;
     }
     hr = g_stereoTex->GetSurfaceLevel(0, &g_stereoStage);
     if (FAILED(hr)) {
-        KLOG(L"EnsureStereoStage: GetSurfaceLevel(non-shared) failed hr=0x%x\n", hr);
+        KLOG(L"EnsureStereoStage: GetSurfaceLevel(stereoStage) failed hr=0x%x\n", hr);
         g_stereoTex->Release();
         g_stereoTex = nullptr;
         return;
     }
 
-    // 2) "Shared" RT — A8R8G8B8 DEFAULT-pool RT used as the swap +
-    // format-conversion target for the StretchRect from g_stereoStage.
-    // When the device is Ex AND the driver lets us share an A8R8G8B8 RT
-    // at these dims, we ask for a kernel handle so Device B can open the
-    // resource directly. Otherwise we still need this surface for the
-    // CPU-readback path's GetRenderTargetData source — so we re-create
-    // it without the shared handle.
+    // 2) A8R8G8B8 DEFAULT-pool RT used as the swap + format-conversion
+    // target for the StretchRect from g_stereoStage. Two creation paths:
     //
-    // Force the format to A8R8G8B8 regardless of the game's BB format.
+    //   GPU SHARED-HANDLE: when the device is Ex AND the driver lets us
+    //   share an A8R8G8B8 RT at these dims, we ask for a kernel handle
+    //   on buffer[0] so Device B can OpenSharedResource against it.
+    //   Buffer[1] stays null — no capture thread needed.
+    //
+    //   CPU READBACK: shared creation failed (or was bypassed). Create
+    //   buffer[0] AND buffer[1] without shared handles, plus a matching
+    //   pair of SYSTEMMEM surfaces. The capture thread does the slow
+    //   GetRenderTargetData / Lock / memcpy out of band so the game's
+    //   Present thread doesn't stall.
+    //
+    // 8-bit BGRA is the lowest-common-denominator shareable format —
     // NVIDIA's D3D9 driver refuses to share 10-bit HDR formats
-    // (D3DFMT_A2R10G10B10 at large dims) at all, and 8-bit BGRA is the
-    // universally-shareable lowest common denominator.
-    // CopyStageToShared_MaybeSwap's StretchRect handles down-conversion
-    // from the non-shared 10-bit capture surface, and downstream consumers
-    // (overlay compose, LeiaSR weaver) all run at 8-bit anyway.
+    // (D3DFMT_A2R10G10B10 at large dims) at all, and downstream
+    // consumers (compose shader, LeiaSR weaver) all run at 8-bit.
     HANDLE sharedHandle = nullptr;
-    hr = device->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET,
+    hr = device->CreateTexture(stagingWidth, stagingHeight, 1, D3DUSAGE_RENDERTARGET,
                                D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
-                               &g_sharedTex, &sharedHandle);
+                               &g_sharedTex[0], &sharedHandle);
     if (FAILED(hr) || !sharedHandle) {
         KLOG(L"EnsureStereoStage: CreateTexture(shared) failed hr=0x%x handle=%p "
              L"— falling back to CPU-readback handoff\n", hr, sharedHandle);
-        if (g_sharedTex) { g_sharedTex->Release(); g_sharedTex = nullptr; }
+        if (g_sharedTex[0]) { g_sharedTex[0]->Release(); g_sharedTex[0] = nullptr; }
         sharedHandle = nullptr;
         // Retry without the shared handle so we still get the swap +
         // format-conversion intermediate.
-        hr = device->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET,
+        hr = device->CreateTexture(stagingWidth, stagingHeight, 1, D3DUSAGE_RENDERTARGET,
                                    D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
-                                   &g_sharedTex, nullptr);
+                                   &g_sharedTex[0], nullptr);
         if (FAILED(hr)) {
-            KLOG(L"EnsureStereoStage: CreateTexture(non-shared 8-bit) also failed hr=0x%x\n", hr);
-            g_sharedTex = nullptr;
+            KLOG(L"EnsureStereoStage: CreateTexture(buf0 non-shared) failed hr=0x%x\n", hr);
+            g_sharedTex[0] = nullptr;
         }
     }
-    if (g_sharedTex) {
-        hr = g_sharedTex->GetSurfaceLevel(0, &g_sharedSurface);
+    if (g_sharedTex[0]) {
+        hr = g_sharedTex[0]->GetSurfaceLevel(0, &g_sharedSurface[0]);
         if (FAILED(hr)) {
-            KLOG(L"EnsureStereoStage: GetSurfaceLevel(shared) failed hr=0x%x\n", hr);
-            g_sharedTex->Release();
-            g_sharedTex = nullptr;
+            KLOG(L"EnsureStereoStage: GetSurfaceLevel(buf0) failed hr=0x%x\n", hr);
+            g_sharedTex[0]->Release();
+            g_sharedTex[0] = nullptr;
             sharedHandle = nullptr;
         }
     }
 
-    // 3) CPU-readback path setup. Only allocated when we don't have a
-    // shared kernel handle. The SYSTEMMEM surface is the destination of
-    // GetRenderTargetData from g_sharedSurface each Present; we then
-    // Lock it and memcpy into g_stagingCpuBuffer for the overlay thread
-    // to pick up.
-    if (!sharedHandle && g_sharedSurface) {
-        hr = device->CreateOffscreenPlainSurface(width, height,
-                                                 D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM,
-                                                 &g_sysmemSurface, nullptr);
-        if (FAILED(hr) || !g_sysmemSurface) {
-            KLOG(L"EnsureStereoStage: CreateOffscreenPlainSurface(SYSTEMMEM) failed hr=0x%x\n", hr);
-            g_sysmemSurface = nullptr;
+    // CPU-readback path: allocate buffer[1] + both SYSTEMMEM surfaces +
+    // the per-buffer locks and the capture thread.
+    if (!sharedHandle && g_sharedSurface[0]) {
+        hr = device->CreateTexture(stagingWidth, stagingHeight, 1, D3DUSAGE_RENDERTARGET,
+                                   D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                   &g_sharedTex[1], nullptr);
+        if (SUCCEEDED(hr) && g_sharedTex[1]) {
+            hr = g_sharedTex[1]->GetSurfaceLevel(0, &g_sharedSurface[1]);
+            if (FAILED(hr)) {
+                g_sharedTex[1]->Release(); g_sharedTex[1] = nullptr;
+                g_sharedSurface[1] = nullptr;
+            }
         } else {
-            // Pitch = width * 4 (A8R8G8B8 is 4 bytes per pixel). We allocate
-            // a contiguous CPU buffer at this pitch to receive each frame.
-            // The critical section MUST be initialized before we publish
-            // g_stagingCpuBuffer — otherwise a consumer racing in could
-            // EnterCriticalSection on uninitialized memory.
+            KLOG(L"EnsureStereoStage: CreateTexture(buf1) failed hr=0x%x — "
+                 L"capture thread will run with single buffer (reduced parallelism)\n", hr);
+            g_sharedTex[1] = nullptr;
+        }
+
+        for (int i = 0; i < 2; ++i) {
+            if (!g_sharedSurface[i]) continue;
+            hr = device->CreateOffscreenPlainSurface(stagingWidth, stagingHeight,
+                                                     D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM,
+                                                     &g_sysmemSurface[i], nullptr);
+            if (FAILED(hr) || !g_sysmemSurface[i]) {
+                KLOG(L"EnsureStereoStage: CreateOffscreenPlainSurface(sysmem[%d]) failed hr=0x%x\n", i, hr);
+                g_sysmemSurface[i] = nullptr;
+            }
+        }
+
+        // Allocate the CPU staging buffer. Init the lock BEFORE publishing
+        // so any consumer that races in sees a usable lock alongside the
+        // non-null buffer pointer.
+        if (g_sysmemSurface[0]) {
             if (!g_stagingCpuLockInit) {
                 InitializeCriticalSection(&g_stagingCpuLock);
                 g_stagingCpuLockInit = true;
             }
-            UINT pitch  = width * 4;
-            SIZE_T bytes = (SIZE_T)pitch * height;
+            UINT pitch  = stagingWidth * 4;
+            SIZE_T bytes = (SIZE_T)pitch * stagingHeight;
             void*  buf  = HeapAlloc(GetProcessHeap(), 0, bytes);
             if (!buf) {
                 KLOG(L"EnsureStereoStage: HeapAlloc(%zu) failed\n", bytes);
-                g_sysmemSurface->Release(); g_sysmemSurface = nullptr;
             } else {
                 InterlockedExchange(&g_stagingCpuFresh, 0);
                 EnterCriticalSection(&g_stagingCpuLock);
                 g_stagingCpuBuffer = buf;
                 g_stagingCpuPitch  = pitch;
                 LeaveCriticalSection(&g_stagingCpuLock);
-                KLOG(L"EnsureStereoStage: CPU-readback buffer ready (%u bytes, pitch=%u)\n",
-                     (unsigned)bytes, pitch);
+                KLOG(L"EnsureStereoStage: CPU-readback buffer ready (%u bytes, pitch=%u, %s)\n",
+                     (unsigned)bytes, pitch,
+                     g_sharedSurface[1] ? L"double-buffered" : L"single-buffered");
+            }
+
+            // Init per-buffer locks (used to serialize game-thread writes
+            // against capture-thread reads on the SAME buffer index).
+            if (!s_bufLockInit) {
+                InitializeCriticalSection(&s_bufLock[0]);
+                InitializeCriticalSection(&s_bufLock[1]);
+                s_bufLockInit = true;
+            }
+
+            // Spawn the capture thread (once per process). It loops on
+            // s_captureEvent until s_captureShutdown is set.
+            s_captureDevice = device;
+            InterlockedExchange(&s_pendingIdx, -1);
+            InterlockedExchange(&s_lastProducedIdx, 0);
+            if (!s_captureEvent)
+                s_captureEvent = CreateEventW(nullptr, FALSE /*auto-reset*/, FALSE, nullptr);
+            if (!s_captureThread) {
+                InterlockedExchange(&s_captureShutdown, 0);
+                s_captureThread = (HANDLE)_beginthreadex(
+                    nullptr, 0, CaptureThreadProc, nullptr, 0, nullptr);
+                if (!s_captureThread)
+                    KLOG(L"EnsureStereoStage: _beginthreadex(capture) failed\n");
+                else
+                    KLOG(L"EnsureStereoStage: capture thread spawned\n");
             }
         }
     }
 
     // Publish for Device B (Output_Overlay.cpp). Format is the SHARED
-    // texture's format (always A8R8G8B8 — see CreateTexture call above),
-    // not the BB format, since that's what Device B's OpenSharedResource
-    // sees on the D3D11 side. sharedHandle == nullptr is the signal to
-    // consumers that the CPU path is active.
+    // texture's format (always A8R8G8B8), not the BB format. sharedHandle
+    // == nullptr signals the CPU path is active.
     g_stagingSharedHandle = sharedHandle;
-    g_stagingWidth        = width;
-    g_stagingHeight       = height;
+    g_stagingWidth        = stagingWidth;
+    g_stagingHeight       = stagingHeight;
     g_stagingD3DFormat    = (UINT)D3DFMT_A8R8G8B8;
 
-    KLOG(L"EnsureStereoStage: published shared handle=%p (non-shared tex=%p, shared tex=%p)\n",
-         g_stagingSharedHandle, g_stereoTex, g_sharedTex);
+    KLOG(L"EnsureStereoStage: published shared handle=%p (buf0=%p, buf1=%p)\n",
+         g_stagingSharedHandle, g_sharedTex[0], g_sharedTex[1]);
 
     // First-time NvAPI handle creation against this device.
     if (!g_nvapi) {
@@ -272,13 +355,36 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
 }
 
 
+// Tear down the capture thread (called from ReleaseStereoStage and
+// process shutdown). Joins the thread so it can't touch surfaces we're
+// about to release.
+static void StopCaptureThread()
+{
+    if (!s_captureThread) return;
+    InterlockedExchange(&s_captureShutdown, 1);
+    if (s_captureEvent) SetEvent(s_captureEvent);
+    WaitForSingleObject(s_captureThread, 1000);
+    CloseHandle(s_captureThread);
+    s_captureThread = nullptr;
+    InterlockedExchange(&s_captureShutdown, 0);
+}
+
+
 static void ReleaseStereoStage()
 {
+    // Stop the capture thread first so we can release surfaces without
+    // racing it.
+    StopCaptureThread();
+    s_captureDevice = nullptr;
+    InterlockedExchange(&s_pendingIdx, -1);
+
     if (g_stereoStage)   { g_stereoStage->Release();   g_stereoStage   = nullptr; }
     if (g_stereoTex)     { g_stereoTex->Release();     g_stereoTex     = nullptr; }
-    if (g_sharedSurface) { g_sharedSurface->Release(); g_sharedSurface = nullptr; }
-    if (g_sharedTex)     { g_sharedTex->Release();     g_sharedTex     = nullptr; }
-    if (g_sysmemSurface) { g_sysmemSurface->Release(); g_sysmemSurface = nullptr; }
+    for (int i = 0; i < 2; ++i) {
+        if (g_sharedSurface[i]) { g_sharedSurface[i]->Release(); g_sharedSurface[i] = nullptr; }
+        if (g_sharedTex[i])     { g_sharedTex[i]->Release();     g_sharedTex[i]     = nullptr; }
+        if (g_sysmemSurface[i]) { g_sysmemSurface[i]->Release(); g_sysmemSurface[i] = nullptr; }
+    }
     if (g_stagingCpuBuffer) {
         if (g_stagingCpuLockInit) EnterCriticalSection(&g_stagingCpuLock);
         HeapFree(GetProcessHeap(), 0, g_stagingCpuBuffer);
@@ -293,57 +399,101 @@ static void ReleaseStereoStage()
 }
 
 
-// Copy the non-shared 2W×H capture into the shared 2W×H texture for
-// Device B. The reverse-stereo-blit capture path hands us R-view on the
-// left half and L-view on the right; the default code path here swaps the
-// halves during this copy so every consumer downstream (compose shader
-// and the LeiaSR weaver alike) reads L on the left and R on the right.
-// Doing the swap here means the fix lands uniformly across all output
-// modes — including LeiaSR, which doesn't go through our compose shader.
+// Game-thread step of the cross-API handoff: StretchRect g_stereoStage
+// (BB-format, reverse-stereo-blit destination) into g_sharedSurface[idx]
+// (A8R8G8B8). Handles the swap_eyes flip as part of the same blit.
 //
-// The INI knob "swap_eyes" CANCELS this default swap for the rare game
-// whose capture already comes back in natural order (then the default
-// swap would reverse them, and swap_eyes=1 puts them back).
-static void CopyStageToShared_MaybeSwap(IDirect3DDevice9* device)
+// The reverse-stereo-blit capture path hands us R-view on the left half
+// and L-view on the right; the default code path here swaps the halves
+// during this copy so every consumer downstream (compose shader, LeiaSR
+// weaver) reads L on left and R on right. Doing the swap here means the
+// fix lands uniformly across all output modes — including LeiaSR, which
+// doesn't go through our compose shader. The INI knob "swap_eyes"
+// CANCELS this default swap for the rare game whose capture already
+// comes back in natural order.
+//
+// All work here is GPU command-queue ops — returns quickly. The slow
+// part (GetRenderTargetData + Lock + memcpy) is handled by the capture
+// thread, see CaptureThreadProc.
+static void CopyStereoToSharedSlot(IDirect3DDevice9* device, int idx)
 {
-    if (!g_stereoStage || !g_sharedSurface) return;
+    if (!g_stereoStage || idx < 0 || idx >= 2 || !g_sharedSurface[idx]) return;
 
     if (g_config.swap_eyes) {
-        device->StretchRect(g_stereoStage, nullptr, g_sharedSurface, nullptr, D3DTEXF_NONE);
-    } else {
-        D3DSURFACE_DESC stDesc;
-        if (FAILED(g_stereoStage->GetDesc(&stDesc))) return;
-        LONG halfW = (LONG)stDesc.Width / 2;
-        LONG h     = (LONG)stDesc.Height;
-
-        RECT leftHalf  = { 0,     0, halfW,             h };
-        RECT rightHalf = { halfW, 0, (LONG)stDesc.Width, h };
-
-        // L source -> R destination
-        device->StretchRect(g_stereoStage, &leftHalf,  g_sharedSurface, &rightHalf, D3DTEXF_NONE);
-        // R source -> L destination
-        device->StretchRect(g_stereoStage, &rightHalf, g_sharedSurface, &leftHalf,  D3DTEXF_NONE);
+        device->StretchRect(g_stereoStage, nullptr, g_sharedSurface[idx], nullptr, D3DTEXF_LINEAR);
+        return;
     }
 
-    // CPU-readback handoff. Active only when shared-handle creation failed
-    // (or was bypassed via alternate_capture_mode=0). GetRenderTargetData
-    // pulls g_sharedSurface's contents into the SYSTEMMEM surface; we then
-    // lock and memcpy into the CPU staging buffer for the overlay thread.
-    if (!g_stagingSharedHandle && g_sysmemSurface && g_stagingCpuBuffer) {
-        HRESULT hr = device->GetRenderTargetData(g_sharedSurface, g_sysmemSurface);
-        if (FAILED(hr)) {
-            KLOG_V(L"CopyStageToShared: GetRenderTargetData failed hr=0x%x\n", hr);
-            return;
+    D3DSURFACE_DESC srcDesc, dstDesc;
+    if (FAILED(g_stereoStage->GetDesc(&srcDesc)))            return;
+    if (FAILED(g_sharedSurface[idx]->GetDesc(&dstDesc)))     return;
+
+    LONG srcHalfW = (LONG)srcDesc.Width / 2;
+    LONG srcH     = (LONG)srcDesc.Height;
+    LONG dstHalfW = (LONG)dstDesc.Width / 2;
+    LONG dstH     = (LONG)dstDesc.Height;
+
+    RECT srcLeft  = { 0,        0, srcHalfW,           srcH };
+    RECT srcRight = { srcHalfW, 0, (LONG)srcDesc.Width, srcH };
+    RECT dstLeft  = { 0,        0, dstHalfW,           dstH };
+    RECT dstRight = { dstHalfW, 0, (LONG)dstDesc.Width, dstH };
+
+    // L source -> R destination (with swap_eyes off by default; one
+    // StretchRect per half, downsampling when staging is capped).
+    device->StretchRect(g_stereoStage, &srcLeft,  g_sharedSurface[idx], &dstRight, D3DTEXF_LINEAR);
+    device->StretchRect(g_stereoStage, &srcRight, g_sharedSurface[idx], &dstLeft,  D3DTEXF_LINEAR);
+}
+
+
+// Capture thread — drains the CPU-readback path out of band so the game's
+// Present thread doesn't have to wait for GetRenderTargetData (which
+// implicit-syncs the GPU and stalls the caller until the readback is
+// physically in SYSTEMMEM). Picks up whichever buffer the game just
+// finished writing via s_pendingIdx, takes the matching s_bufLock so the
+// game can't reuse that buffer mid-copy, does the GRTData + Lock + memcpy
+// into the CPU staging buffer, then signals the overlay via the existing
+// g_stagingCpuFresh flag.
+static unsigned __stdcall CaptureThreadProc(void* /*param*/)
+{
+    KLOG(L"CaptureThread: started\n");
+    while (!InterlockedCompareExchange(&s_captureShutdown, 0, 0)) {
+        DWORD wait = WaitForSingleObject(s_captureEvent, 50);
+        if (InterlockedCompareExchange(&s_captureShutdown, 0, 0)) break;
+        if (wait == WAIT_TIMEOUT) continue;
+        if (wait != WAIT_OBJECT_0) break;
+
+        LONG idx = InterlockedExchange(&s_pendingIdx, -1);
+        if (idx < 0 || idx >= 2) continue;
+
+        IDirect3DDevice9* device = s_captureDevice;
+        if (!device || !g_sharedSurface[idx] || !g_sysmemSurface[idx]) continue;
+
+        EnterCriticalSection(&s_bufLock[idx]);
+        // Re-verify after acquiring the lock — release path may have run
+        // while we were waiting.
+        if (!s_captureDevice || !g_sharedSurface[idx] || !g_sysmemSurface[idx] ||
+            !g_stagingCpuBuffer) {
+            LeaveCriticalSection(&s_bufLock[idx]);
+            continue;
         }
+
+        HRESULT hr = device->GetRenderTargetData(g_sharedSurface[idx], g_sysmemSurface[idx]);
+        if (FAILED(hr)) {
+            KLOG_V(L"CaptureThread: GetRenderTargetData(idx=%d) hr=0x%x\n", idx, hr);
+            LeaveCriticalSection(&s_bufLock[idx]);
+            continue;
+        }
+
         D3DLOCKED_RECT lr;
-        hr = g_sysmemSurface->LockRect(&lr, nullptr, D3DLOCK_READONLY);
+        hr = g_sysmemSurface[idx]->LockRect(&lr, nullptr, D3DLOCK_READONLY);
         if (FAILED(hr)) {
-            KLOG_V(L"CopyStageToShared: LockRect failed hr=0x%x\n", hr);
-            return;
+            KLOG_V(L"CaptureThread: LockRect(idx=%d) hr=0x%x\n", idx, hr);
+            LeaveCriticalSection(&s_bufLock[idx]);
+            continue;
         }
+
         EnterCriticalSection(&g_stagingCpuLock);
         if (g_stagingCpuBuffer) {
-            // If pitches match, one big memcpy; otherwise row by row.
             if ((UINT)lr.Pitch == g_stagingCpuPitch) {
                 memcpy(g_stagingCpuBuffer, lr.pBits,
                        (SIZE_T)g_stagingCpuPitch * g_stagingHeight);
@@ -360,8 +510,57 @@ static void CopyStageToShared_MaybeSwap(IDirect3DDevice9* device)
             }
         }
         LeaveCriticalSection(&g_stagingCpuLock);
-        g_sysmemSurface->UnlockRect();
+        g_sysmemSurface[idx]->UnlockRect();
+        LeaveCriticalSection(&s_bufLock[idx]);
         InterlockedExchange(&g_stagingCpuFresh, 1);
+    }
+    KLOG(L"CaptureThread: exiting\n");
+    return 0;
+}
+
+
+// Game-thread producer entry. Picks the buffer the capture thread isn't
+// holding (so the StretchRect doesn't wait on a slow GRTData), does the
+// StretchRect (swap + format conversion), and, on the CPU-readback path,
+// publishes the chosen index for the capture thread to drain.
+//
+// Buffer selection uses TryEnterCriticalSection on the alternate buffer
+// first — if the capture thread has it, fall back to the buffer we wrote
+// last time (capture thread won't be there, it only holds one buffer at
+// a time). On the GPU shared-handle path, buffer[1] is unallocated, so
+// we always use buffer[0] and skip the publish.
+static void PublishStereoFrame(IDirect3DDevice9* device)
+{
+    if (!g_stereoStage) return;
+
+    bool cpuPath  = (g_stagingSharedHandle == nullptr);
+    bool dualBuf  = cpuPath && (g_sharedSurface[1] != nullptr) && s_bufLockInit;
+
+    int idx = 0;
+    if (dualBuf) {
+        int prefer = (InterlockedCompareExchange(&s_lastProducedIdx, 0, 0) + 1) & 1;
+        if (TryEnterCriticalSection(&s_bufLock[prefer])) {
+            idx = prefer;
+        } else {
+            EnterCriticalSection(&s_bufLock[1 - prefer]);
+            idx = 1 - prefer;
+        }
+    } else if (s_bufLockInit) {
+        EnterCriticalSection(&s_bufLock[0]);
+    }
+
+    CopyStereoToSharedSlot(device, idx);
+
+    if (dualBuf || s_bufLockInit) {
+        if (dualBuf) LeaveCriticalSection(&s_bufLock[idx]);
+        else         LeaveCriticalSection(&s_bufLock[0]);
+    }
+
+    InterlockedExchange(&s_lastProducedIdx, idx);
+
+    if (cpuPath && s_captureEvent && s_captureThread) {
+        InterlockedExchange(&s_pendingIdx, idx);
+        SetEvent(s_captureEvent);
     }
 }
 
@@ -549,7 +748,7 @@ static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
 
                 // Then propagate to the shared texture for Device B,
                 // swapping halves if the user has set swap_eyes.
-                CopyStageToShared_MaybeSwap(This);
+                PublishStereoFrame(This);
             }
             else {
                 // Automatic Mode: reverse-stereo-blit captures both eyes
@@ -559,7 +758,7 @@ static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
                 // BlitControl is TRUE.
                 NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, true);
                 This->StretchRect(backBuffer, nullptr, g_stereoStage, nullptr, D3DTEXF_NONE);
-                CopyStageToShared_MaybeSwap(This);
+                PublishStereoFrame(This);
                 NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, false);
             }
 
