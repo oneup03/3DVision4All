@@ -105,6 +105,20 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 }
 
 
+// Build an all-transparent 32x32 HCURSOR. Used as the overlay class
+// cursor when confine_cursor is on so Windows draws nothing for the
+// cursor over our region (the class-cursor = NULL default leaves the
+// last-set cursor visible).
+static HCURSOR MakeInvisibleCursor()
+{
+    BYTE andMask[32 * 4];   // 32 rows * 32 bits = 32 * 4 bytes
+    BYTE xorMask[32 * 4];
+    memset(andMask, 0xFF, sizeof(andMask));  // AND=1 + XOR=0 → transparent
+    memset(xorMask, 0x00, sizeof(xorMask));
+    return CreateCursor(GetModuleHandleW(nullptr), 0, 0, 32, 32, andMask, xorMask);
+}
+
+
 static bool EnsureWindowClass(HMODULE hSelf)
 {
     if (s_classAtom) return true;
@@ -114,11 +128,12 @@ static bool EnsureWindowClass(HMODULE hSelf)
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = OverlayWndProc;
     wc.hInstance     = hSelf ? hSelf : GetModuleHandleW(nullptr);
-    // No class cursor — with WS_EX_LAYERED|WS_EX_TRANSPARENT the cursor
-    // falls through to the game, but a non-null class cursor would still get
-    // set as the OS arrow over us anyway. Leave nullptr so the game's cursor
-    // (whichever it set via SetCursor) is what's visible.
-    wc.hCursor       = nullptr;
+    // Class cursor: NULL by default so the cursor the game set via
+    // SetCursor stays visible. When hide_cursor is on, use a fully-
+    // transparent cursor instead so the system arrow doesn't show over
+    // our overlay region (games that only ShowCursor(FALSE) when they
+    // believe they're FSE-active won't do it under force_windowed).
+    wc.hCursor       = g_config.hide_cursor ? MakeInvisibleCursor() : nullptr;
     wc.hbrBackground = nullptr;
     wc.lpszClassName = kOverlayClassName;
 
@@ -270,49 +285,146 @@ static bool CreateDeviceB(HWND overlayHwnd, UINT width, UINT height)
 }
 
 
-// Open (or re-open) the DX9Ex shared staging texture on D3D11. DX9Ex's
-// pSharedHandle returns an old-style (KMT) shared handle, which D3D11
-// accepts via ID3D11Device::OpenSharedResource.
+// Cached dims for the CPU-upload path so EnsureStagingOnB can detect when
+// the producer's staging size changed (Reset, new game resolution) and
+// recreate s_sharedTex.
+static UINT s_cpuTexWidth  = 0;
+static UINT s_cpuTexHeight = 0;
+
+
+// Ensure s_sharedTex / s_sharedSRV are populated and current.
+//
+// Two paths:
+//   1. SHARED-HANDLE (the Ex path). g_stagingSharedHandle is non-null;
+//      DX9Ex's pSharedHandle is a legacy (KMT) shared handle, which
+//      D3D11 accepts via ID3D11Device::OpenSharedResource.
+//   2. CPU-READBACK (when shared-handle creation isn't available).
+//      g_stagingSharedHandle is null but g_stagingCpuBuffer is set; we
+//      create a DYNAMIC BGRA8 staging texture sized to match, and the
+//      per-frame UpdateStagingFromCpuBufferIfFresh helper Map's it with
+//      WRITE_DISCARD and memcpys from the published CPU buffer.
 static bool EnsureStagingOnB()
 {
     HANDLE pub = g_stagingSharedHandle;
-    if (!pub) return false;
 
-    if (s_sharedTex && s_openedHandle == pub)
+    if (pub) {
+        if (s_sharedTex && s_openedHandle == pub)
+            return true;
+
+        if (s_sharedSRV) { s_sharedSRV->Release(); s_sharedSRV = nullptr; }
+        if (s_sharedTex) { s_sharedTex->Release(); s_sharedTex = nullptr; }
+        s_openedHandle = nullptr;
+        s_cpuTexWidth = s_cpuTexHeight = 0;
+
+        HRESULT hr = s_deviceB->OpenSharedResource(pub, __uuidof(ID3D11Texture2D),
+                                                   (void**)&s_sharedTex);
+        if (FAILED(hr) || !s_sharedTex) {
+            KLOG(L"Output_Overlay: OpenSharedResource failed hr=0x%x handle=%p\n", hr, pub);
+            s_sharedTex = nullptr;
+            return false;
+        }
+
+        D3D11_TEXTURE2D_DESC td = {};
+        s_sharedTex->GetDesc(&td);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format                    = td.Format;
+        sd.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MostDetailedMip = 0;
+        sd.Texture2D.MipLevels       = 1;
+        hr = s_deviceB->CreateShaderResourceView(s_sharedTex, &sd, &s_sharedSRV);
+        if (FAILED(hr) || !s_sharedSRV) {
+            KLOG(L"Output_Overlay: CreateShaderResourceView hr=0x%x format=%d\n",
+                 hr, (int)td.Format);
+            s_sharedTex->Release(); s_sharedTex = nullptr;
+            return false;
+        }
+
+        s_openedHandle = pub;
+        KLOG(L"Output_Overlay: opened shared staging on D3D11 (%ux%u fmt=%d) handle=%p\n",
+             td.Width, td.Height, (int)td.Format, pub);
+        return true;
+    }
+
+    // CPU-readback path.
+    if (!g_stagingCpuBuffer || !g_stagingWidth || !g_stagingHeight)
+        return false;
+
+    if (s_sharedTex && s_openedHandle == nullptr &&
+        s_cpuTexWidth == g_stagingWidth && s_cpuTexHeight == g_stagingHeight)
         return true;
 
     if (s_sharedSRV) { s_sharedSRV->Release(); s_sharedSRV = nullptr; }
     if (s_sharedTex) { s_sharedTex->Release(); s_sharedTex = nullptr; }
     s_openedHandle = nullptr;
+    s_cpuTexWidth = s_cpuTexHeight = 0;
 
-    HRESULT hr = s_deviceB->OpenSharedResource(pub, __uuidof(ID3D11Texture2D),
-                                               (void**)&s_sharedTex);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width            = g_stagingWidth;
+    td.Height           = g_stagingHeight;
+    td.MipLevels        = 1;
+    td.ArraySize        = 1;
+    td.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage            = D3D11_USAGE_DYNAMIC;
+    td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
+    HRESULT hr = s_deviceB->CreateTexture2D(&td, nullptr, &s_sharedTex);
     if (FAILED(hr) || !s_sharedTex) {
-        KLOG(L"Output_Overlay: OpenSharedResource failed hr=0x%x handle=%p\n", hr, pub);
+        KLOG(L"Output_Overlay: CPU-path CreateTexture2D hr=0x%x %ux%u\n",
+             hr, g_stagingWidth, g_stagingHeight);
         s_sharedTex = nullptr;
         return false;
     }
-
-    D3D11_TEXTURE2D_DESC td = {};
-    s_sharedTex->GetDesc(&td);
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format                    = td.Format;
-    sd.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MostDetailedMip = 0;
-    sd.Texture2D.MipLevels       = 1;
-    hr = s_deviceB->CreateShaderResourceView(s_sharedTex, &sd, &s_sharedSRV);
+    hr = s_deviceB->CreateShaderResourceView(s_sharedTex, nullptr, &s_sharedSRV);
     if (FAILED(hr) || !s_sharedSRV) {
-        KLOG(L"Output_Overlay: CreateShaderResourceView hr=0x%x format=%d\n",
-             hr, (int)td.Format);
+        KLOG(L"Output_Overlay: CPU-path CreateSRV hr=0x%x\n", hr);
         s_sharedTex->Release(); s_sharedTex = nullptr;
         return false;
     }
 
-    s_openedHandle = pub;
-    KLOG(L"Output_Overlay: opened shared staging on D3D11 (%ux%u fmt=%d) handle=%p\n",
-         td.Width, td.Height, (int)td.Format, pub);
+    s_cpuTexWidth  = g_stagingWidth;
+    s_cpuTexHeight = g_stagingHeight;
+    KLOG(L"Output_Overlay: CPU-upload staging texture created %ux%u (dynamic BGRA8)\n",
+         g_stagingWidth, g_stagingHeight);
     return true;
+}
+
+
+// CPU-path only. If the producer set the "fresh" flag, Map s_sharedTex
+// (DYNAMIC, WRITE_DISCARD) and memcpy in the current frame from the
+// published CPU buffer. Cheap when the flag is clear (no Map call).
+static void UpdateStagingFromCpuBufferIfFresh()
+{
+    if (g_stagingSharedHandle) return;      // shared-handle path; nothing to upload
+    if (!s_sharedTex || !g_stagingCpuBuffer) return;
+    if (InterlockedExchange(&g_stagingCpuFresh, 0) == 0) return;
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    HRESULT hr = s_contextB->Map(s_sharedTex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(hr)) {
+        KLOG(L"Output_Overlay: CPU-path Map hr=0x%x\n", hr);
+        return;
+    }
+    EnterCriticalSection(&g_stagingCpuLock);
+    if (g_stagingCpuBuffer) {
+        if (mapped.RowPitch == g_stagingCpuPitch) {
+            memcpy(mapped.pData, g_stagingCpuBuffer,
+                   (SIZE_T)g_stagingCpuPitch * g_stagingHeight);
+        } else {
+            BYTE*       dst       = (BYTE*)mapped.pData;
+            const BYTE* src       = (const BYTE*)g_stagingCpuBuffer;
+            UINT        copyBytes = mapped.RowPitch < g_stagingCpuPitch
+                                        ? mapped.RowPitch : g_stagingCpuPitch;
+            for (UINT y = 0; y < g_stagingHeight; ++y) {
+                memcpy(dst, src, copyBytes);
+                dst += mapped.RowPitch;
+                src += g_stagingCpuPitch;
+            }
+        }
+    }
+    LeaveCriticalSection(&g_stagingCpuLock);
+    s_contextB->Unmap(s_sharedTex, 0);
 }
 
 
@@ -430,6 +542,7 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
         // frame is cheap (a few µs) and ironclad — same pattern RTSS uses.
         {
             static bool s_overlayShown = true;
+            static bool s_cursorClipped = false;
             HWND fg = GetForegroundWindow();
             DWORD fgPid = 0;
             if (fg) GetWindowThreadProcessId(fg, &fgPid);
@@ -438,12 +551,38 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
                 ShowWindow(s_overlayHwnd, wantShown ? SW_SHOWNA : SW_HIDE);
                 s_overlayShown = wantShown;
             }
+            // Cursor confinement: emulate the FSE-style ClipCursor that
+            // force_windowed disables. Apply only while the game is the
+            // foreground process so alt-tab still releases the cursor.
+            // Re-asserted each frame because Windows itself releases the
+            // clip when foreground changes, which means we need to re-grab
+            // it on the way back in.
+            if (g_config.confine_cursor) {
+                if (wantShown && s_gameHwnd) {
+                    RECT r = {};
+                    if (GetWindowRect(s_gameHwnd, &r))
+                        ClipCursor(&r);
+                    s_cursorClipped = true;
+                } else if (s_cursorClipped) {
+                    ClipCursor(nullptr);
+                    s_cursorClipped = false;
+                }
+            }
+            // Per-frame SetCursor(NULL) from this (responsive) thread.
+            // Belt-and-suspenders over the WndProc subclass + class-cursor
+            // swap, for games whose UI thread is unresponsive enough that
+            // DWM shows the busy cursor independently of WM_SETCURSOR. The
+            // cursor is a global GDI resource — SetCursor from any thread
+            // updates the visible shape.
+            if (wantShown && g_config.hide_cursor)
+                SetCursor(nullptr);
             if (!wantShown) continue;
             SetWindowPos(s_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         if (!EnsureStagingOnB()) continue;
+        UpdateStagingFromCpuBufferIfFresh();
 
         bool didWeave = false;
         if (g_config.mode == StereoMode::LeiaSR) {
@@ -501,7 +640,11 @@ void Overlay_StartOnce(HWND gameHwnd)
         return;
     }
 
-    if (!g_stagingSharedHandle || g_stagingWidth == 0 || g_stagingHeight == 0) {
+    // Need either path published (Ex shared-handle, or CPU-readback buffer)
+    // and known dims before we can size Device B's swap chain.
+    bool stagingReady = (g_stagingSharedHandle != nullptr) ||
+                        (g_stagingCpuBuffer != nullptr);
+    if (!stagingReady || g_stagingWidth == 0 || g_stagingHeight == 0) {
         InterlockedExchange(&s_startOnce, 0);
         return;
     }
@@ -537,6 +680,10 @@ void Overlay_NotifyFrame()
 void Overlay_ShutdownOnce()
 {
     if (!s_thread && !s_overlayHwnd) return;
+
+    // Release any cursor clip we set so the user gets their cursor back
+    // if the overlay was shutting down with the game still in foreground.
+    if (g_config.confine_cursor) ClipCursor(nullptr);
 
     s_shutdown = true;
     if (s_frameEvent) SetEvent(s_frameEvent);

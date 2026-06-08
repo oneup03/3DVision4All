@@ -15,18 +15,15 @@
  * along with 3DVision4All. If not, see <http://www.gnu.org/licenses/>.
  */
 
-// This file is compiled as a C file only, not C++.
-// The reason: we use the C-style CINTERFACE for d3d9.h, which exposes the
-// lpVtbl pointer directly so we can extract function addresses for hooking
-// without magic offsets.
-//
-// Lifted from DeviarePlugin/Addresses.c, DX9-only (DX11 entries dropped per
-// the 3DVision4All plan).
+// This file is compiled as a C file only, not C++. We use the C-style
+// CINTERFACE for d3d9.h to expose the lpVtbl pointer directly so we can
+// extract function addresses for hooking without magic offsets.
 //
 // Warning: the C interface for DX9Ex is broken in older Windows SDKs
-// (missing RegisterSoftwareDevice in IDirect3D9Ex), so we set D3D_DISABLE_9EX
-// to keep the C interface clean. Pass IDirect3D9Ex pointers in as the
-// IDirect3D9 base class — the vtable address is the same.
+// (missing RegisterSoftwareDevice in IDirect3D9Ex), so we set
+// D3D_DISABLE_9EX to keep the C interface clean. Pass IDirect3D9Ex
+// pointers in as the IDirect3D9 base class — the vtable address is the
+// same.
 
 #define CINTERFACE
 #define D3D_DISABLE_9EX

@@ -85,7 +85,7 @@ struct Config {
     wchar_t    log_path[MAX_PATH] = L"";
     int        log_level = 1; // 0=off, 1=info, 2=verbose
 
-    // Add WS_EX_LAYERED + LWA_ALPHA(255) to the GAME's window after
+    // Add WS_EX_LAYERED + LWA_ALPHA(255) to the game's window after
     // CreateDevice/Reset. DWM can't DirectFlip a layered window's swap
     // chain, so this forces composition through the redirection surface —
     // at which point our topmost overlay actually shows over the game.
@@ -93,20 +93,92 @@ struct Config {
     // DirectFlip and the overlay is invisible without this.
     int        defeat_directflip = 1;
 
-    // Optional: stamp this into the game's CreateDevice/Reset present params.
-    // 0,0 = leave the game's requested BackBufferWidth/Height alone (still
-    // force windowed). The overlay always upscales the captured staging to
-    // the panel's native resolution via the compose shader's linear sampler,
-    // so interlaced / checkerboard / LeiaSR patterns line up pixel-perfectly
-    // regardless of the game's render resolution.
+    // Force pp->Windowed = TRUE in CreateDevice/Reset. Default ON because
+    // our overlay (a layered topmost window) cannot composite over an
+    // FSE swap chain — FSE bypasses DWM entirely. Set to 0 for games
+    // whose init path is FSE-only and breaks when yanked into windowed;
+    // with this off the overlay won't appear over a FSE game, but at
+    // least the game launches.
+    int        force_windowed = 1;
+
+    // Cursor confinement and visibility. The two knobs are independent:
     //
-    // Defaults to OFF because many games (notably UE3-derived titles such
-    // as Brothers - A Tale of Two Sons) cache their viewport / projection
-    // matrix from their requested resolution and don't re-query the BB after
-    // CreateDevice returns. Forcing a smaller BB on those games clips their
-    // render to the top-left of the BB — visible as "only the top-left
-    // quarter of the game world is rendered" across every stereo mode.
-    // Set non-zero only if you've confirmed the specific game cooperates.
+    // confine_cursor (default 0): ClipCursor the cursor to the game HWND
+    // each frame while the game is foreground, emulating the FSE clip
+    // that force_windowed disables. Released on alt-tab.
+    //
+    // hide_cursor (default 0): hide the OS cursor while it's over the
+    // game. Three layers of defense:
+    //   1. The overlay window class uses a fully-transparent cursor so
+    //      Windows doesn't draw the system arrow over the overlay region.
+    //   2. The game's window class hCursor is swapped to an invisible
+    //      cursor (SetClassLongPtr) so DefWindowProc's WM_SETCURSOR path
+    //      can't reach the game's original cursor either.
+    //   3. The game's WndProc is subclassed to swallow WM_SETCURSOR
+    //      directly, and the overlay thread calls SetCursor(NULL) per
+    //      frame as belt-and-suspenders.
+    // Enable for games that don't manage cursor visibility themselves
+    // under windowed mode. Leave at 0 for games whose in-game cursor
+    // should remain visible.
+    int        confine_cursor = 0;
+    int        hide_cursor    = 0;
+
+    // Capture-mode selector (see Hooks_DX9.cpp::EnsureStereoStage and the
+    // Hooked_Direct3DCreate9 chain). The wrapper has two cross-API
+    // handoff paths from Device A (D3D9 capture) to Device B (D3D11
+    // overlay):
+    //
+    // alternate_capture_mode = 1 (default): the D3D9 device is silently
+    // upgraded to IDirect3D9Ex, NvAPI's reverse-stereo-blit lands in an
+    // Ex shared-handle render target, and Device B opens that texture
+    // directly via OpenSharedResource. Fastest path; zero CPU readback.
+    // Side effect: Ex rejects D3DPOOL_MANAGED, so the hooked Create*
+    // methods rewrite MANAGED → DEFAULT and add D3DUSAGE_DYNAMIC. Most
+    // games tolerate this fine.
+    //
+    // alternate_capture_mode = 0: the device stays plain (non-Ex), the
+    // pool rewrite is skipped, and the staging is copied each frame via
+    // GetRenderTargetData → SYSTEMMEM → CPU buffer → D3D11 dynamic
+    // texture Map/Unmap. Required for games whose own pipeline crashes
+    // under the Ex upgrade or the MANAGED rewrite. Costs one extra
+    // GPU→CPU + CPU→GPU round-trip per frame; usually invisible at
+    // <= 1080p, measurable at 4K but still functional.
+    int        alternate_capture_mode = 1;
+
+    // Diagnostic knobs — three points where we can cut off our hook
+    // surface to bisect a crash. All default 1 (full hook coverage).
+    //
+    //   install_device_hooks: when 0, skip the per-device vtable hooks
+    //     (Present / Reset / Create*). Game runs as if we only observed
+    //     CreateDevice; no stereo capture.
+    //   install_d3d9_vtable_hooks: when 0, skip the IDirect3D9 vtable
+    //     hooks entirely (CreateDevice + the display-mode enumerators).
+    //     Game's CreateDevice runs untouched.
+    //   install_d3d9_display_mode_hooks: when 0, install the CreateDevice
+    //     hook but skip the three display-mode enumerator hooks. Set
+    //     this when a game's display-mode init flow crashes inside the
+    //     NktHookLib trampoline for those calls.
+    int        install_device_hooks            = 1;
+    int        install_d3d9_vtable_hooks       = 1;
+    int        install_d3d9_display_mode_hooks = 1;
+
+    // Optional: stamp this into the game's CreateDevice/Reset present
+    // params, and feed the same dims back to display-mode probes
+    // (GetSystemMetrics, EnumAdapterModes, GetDeviceCaps,
+    // EnumDisplaySettings) so games that auto-detect the desktop pick
+    // the configured resolution instead of the panel's native.
+    //
+    // 0,0 (default) = leave the game's requested BackBufferWidth/Height
+    // alone. The overlay always upscales the captured staging to the
+    // panel's native via the compose shader's linear sampler, so
+    // interlaced / checkerboard / LeiaSR patterns line up regardless of
+    // what the game renders at — this knob is therefore a perf lever.
+    //
+    // Many games cache their viewport / projection matrix from the
+    // resolution they asked for at CreateDevice and never re-query the
+    // BB. Forcing a smaller BB on those games clips their render to the
+    // top-left of the BB ("top-left quarter" failure across every stereo
+    // mode). Set non-zero only when the specific game cooperates.
     UINT       render_width  = 0;
     UINT       render_height = 0;
 };
@@ -158,7 +230,10 @@ void DX9_InstallHooks();
 // Install the CreateDevice + display-mode-enumeration vtable hooks on an
 // IDirect3D9Ex returned by some real-export-side path (e.g. the
 // Proxy_Direct3DCreate9Ex export below). Idempotent.
-void DX9_InstallVtableHooksOn(IDirect3D9Ex* pDX9Ex);
+// Accepts either IDirect3D9 or IDirect3D9Ex — the only vtable entries we
+// touch are the ones shared between the two interfaces (CreateDevice plus
+// display-mode enumeration), so a plain non-Ex object works fine here.
+void DX9_InstallVtableHooksOn(IDirect3D9* pDX9);
 
 
 // --------------------------------------------------------------------------
@@ -213,14 +288,31 @@ void Overlay_ShutdownOnce();
 
 
 // --------------------------------------------------------------------------
-// Cross-device shared staging texture published by Device A's capture path
-// for Device B to open. See Hooks_DX9.cpp::EnsureStereoStage. Set once on
+// Cross-device staging handoff published by Device A's capture path for
+// Device B to consume. See Hooks_DX9.cpp::EnsureStereoStage. Set once on
 // first capture, cleared on Hooked_Reset.
+//
+// Two paths, selected at staging-setup time based on alternate_capture_mode
+// (and a fallback if shared-handle creation fails):
+//
+//   SHARED-HANDLE path (Ex device): g_stagingSharedHandle is a kernel
+//     handle Device B opens via OpenSharedResource. Zero CPU readback.
+//
+//   CPU-READBACK path (non-Ex device or shared creation refused — for
+//     example NVIDIA's D3D9 driver refusing to share 10-bit HDR formats
+//     at large dims): g_stagingSharedHandle is nullptr, g_stagingCpuBuffer
+//     holds the most recent frame, guarded by g_stagingCpuLock and
+//     announced by g_stagingCpuFresh.
 extern HANDLE g_stagingSharedHandle;
 extern UINT   g_stagingWidth;
 extern UINT   g_stagingHeight;
 extern UINT   g_stagingD3DFormat;
 extern HWND   g_gameFocusHwnd;
+
+extern void*            g_stagingCpuBuffer;
+extern UINT             g_stagingCpuPitch;
+extern CRITICAL_SECTION g_stagingCpuLock;
+extern volatile LONG    g_stagingCpuFresh;
 
 
 // --------------------------------------------------------------------------

@@ -15,38 +15,40 @@
  * along with 3DVision4All. If not, see <http://www.gnu.org/licenses/>.
  */
 
-// DX9 hook chain lifted from DeviarePlugin/InProc_DX9.cpp.
-//
-// Key refactors vs. the original:
-//  * No cross-process IPC: dropped CaptureSetupMutex / ReleaseSetupMutex /
-//    gMappedView writes / gGameSharedHandle / D3DSHAREDHANDLE arguments.
-//  * No secondary shared RenderTarget — StretchRect destination on Present
-//    is now the game's own backbuffer (the SbS override).
-//  * The 2W×H stereo staging surface is local to this process and used only
-//    as the StretchRect source for the squeeze pass.
+// DX9 hook chain — installs trampolines on the D3D9 export, the
+// IDirect3D9 vtable, and each created IDirect3DDevice9's vtable to drive
+// the NvAPI reverse-stereo-blit capture and publish the resulting SbS
+// frame to the D3D11 overlay (Output_Overlay.cpp).
 
 #include "Core.h"
 
 
-// Two-texture capture path (per bo3b's hard-won finding in the original
-// DeviarePlugin/InProc_DX9.cpp:181-238):
+// Two-texture capture path. Collapsing these into a single surface
+// silently breaks the reverse-stereo-blit on at least some driver
+// versions — the driver writes mono content and gives no error.
 //
-//   g_stereoTex / g_stereoStage — NON-shared RT, sized 2W×H. Reverse-stereo
-//     -blit writes into this. Critical: the destination of reverse-blit
-//     CANNOT be a shared-handle texture; the driver silently fails and
-//     stores mono content.
+//   g_stereoTex / g_stereoStage — NON-shared RT, sized 2W×H, in the BB's
+//     own format. Destination of reverse-stereo-blit. Must NOT be a
+//     shared-handle texture.
 //
-//   g_sharedTex / g_sharedSurface — SHARED RT, sized 2W×H, created with a
-//     non-null pSharedHandle so DX9Ex returns a kernel handle Device B can
-//     open. We StretchRect from g_stereoStage into this every frame
-//     (still under reverse-blit-control = true), and the cross-device
-//     share carries the data to Device B.
-//
-// Collapsing these two into one (which we tried first) loses stereo content.
+//   g_sharedTex / g_sharedSurface — RT in A8R8G8B8 (the universally-
+//     shareable lowest common denominator). Receives a StretchRect from
+//     g_stereoStage that handles swap_eyes and format conversion in one
+//     go. With alternate_capture_mode=1 (Ex device) and the driver
+//     willing, this is created with a non-null pSharedHandle so Device B
+//     can OpenSharedResource against it directly. Otherwise it falls
+//     through to the CPU-readback path (see g_sysmemSurface below).
 static IDirect3DTexture9* g_stereoTex     = nullptr;
 static IDirect3DSurface9* g_stereoStage   = nullptr;
 static IDirect3DTexture9* g_sharedTex     = nullptr;
 static IDirect3DSurface9* g_sharedSurface = nullptr;
+
+// CPU-readback path (used when shared-handle creation is unavailable).
+// g_sysmemSurface is the SYSTEMMEM readback target of GetRenderTargetData
+// against g_sharedSurface. After Lock, its contents are memcpy'd into the
+// heap-allocated g_stagingCpuBuffer under g_stagingCpuLock, then
+// g_stagingCpuFresh is set so the overlay thread picks it up.
+static IDirect3DSurface9* g_sysmemSurface = nullptr;
 
 // Published for Output_Overlay.cpp / Device B to pick up. Cleared on Reset.
 HANDLE g_stagingSharedHandle = nullptr;
@@ -54,6 +56,12 @@ UINT   g_stagingWidth        = 0;
 UINT   g_stagingHeight       = 0;
 UINT   g_stagingD3DFormat    = 0;
 HWND   g_gameFocusHwnd       = nullptr;
+
+void*            g_stagingCpuBuffer = nullptr;
+UINT             g_stagingCpuPitch  = 0;
+CRITICAL_SECTION g_stagingCpuLock   = {};
+volatile LONG    g_stagingCpuFresh  = 0;
+static bool      g_stagingCpuLockInit = false;
 
 
 // Hook trampolines — set by g_nktInProc.Hook().
@@ -152,17 +160,41 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
         return;
     }
 
-    // 2) Shared RT — Device B opens this via the kernel handle.
+    // 2) "Shared" RT — A8R8G8B8 DEFAULT-pool RT used as the swap +
+    // format-conversion target for the StretchRect from g_stereoStage.
+    // When the device is Ex AND the driver lets us share an A8R8G8B8 RT
+    // at these dims, we ask for a kernel handle so Device B can open the
+    // resource directly. Otherwise we still need this surface for the
+    // CPU-readback path's GetRenderTargetData source — so we re-create
+    // it without the shared handle.
+    //
+    // Force the format to A8R8G8B8 regardless of the game's BB format.
+    // NVIDIA's D3D9 driver refuses to share 10-bit HDR formats
+    // (D3DFMT_A2R10G10B10 at large dims) at all, and 8-bit BGRA is the
+    // universally-shareable lowest common denominator.
+    // CopyStageToShared_MaybeSwap's StretchRect handles down-conversion
+    // from the non-shared 10-bit capture surface, and downstream consumers
+    // (overlay compose, LeiaSR weaver) all run at 8-bit anyway.
     HANDLE sharedHandle = nullptr;
     hr = device->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET,
-                               desc.Format, D3DPOOL_DEFAULT,
+                               D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
                                &g_sharedTex, &sharedHandle);
     if (FAILED(hr) || !sharedHandle) {
-        KLOG(L"EnsureStereoStage: CreateTexture(shared) failed hr=0x%x handle=%p — overlay won't have data\n",
-             hr, sharedHandle);
-        // Capture still works for in-process use; just no cross-device.
+        KLOG(L"EnsureStereoStage: CreateTexture(shared) failed hr=0x%x handle=%p "
+             L"— falling back to CPU-readback handoff\n", hr, sharedHandle);
+        if (g_sharedTex) { g_sharedTex->Release(); g_sharedTex = nullptr; }
         sharedHandle = nullptr;
-    } else {
+        // Retry without the shared handle so we still get the swap +
+        // format-conversion intermediate.
+        hr = device->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET,
+                                   D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                   &g_sharedTex, nullptr);
+        if (FAILED(hr)) {
+            KLOG(L"EnsureStereoStage: CreateTexture(non-shared 8-bit) also failed hr=0x%x\n", hr);
+            g_sharedTex = nullptr;
+        }
+    }
+    if (g_sharedTex) {
         hr = g_sharedTex->GetSurfaceLevel(0, &g_sharedSurface);
         if (FAILED(hr)) {
             KLOG(L"EnsureStereoStage: GetSurfaceLevel(shared) failed hr=0x%x\n", hr);
@@ -172,11 +204,55 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
         }
     }
 
-    // Publish for Device B (Output_Overlay.cpp).
+    // 3) CPU-readback path setup. Only allocated when we don't have a
+    // shared kernel handle. The SYSTEMMEM surface is the destination of
+    // GetRenderTargetData from g_sharedSurface each Present; we then
+    // Lock it and memcpy into g_stagingCpuBuffer for the overlay thread
+    // to pick up.
+    if (!sharedHandle && g_sharedSurface) {
+        hr = device->CreateOffscreenPlainSurface(width, height,
+                                                 D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM,
+                                                 &g_sysmemSurface, nullptr);
+        if (FAILED(hr) || !g_sysmemSurface) {
+            KLOG(L"EnsureStereoStage: CreateOffscreenPlainSurface(SYSTEMMEM) failed hr=0x%x\n", hr);
+            g_sysmemSurface = nullptr;
+        } else {
+            // Pitch = width * 4 (A8R8G8B8 is 4 bytes per pixel). We allocate
+            // a contiguous CPU buffer at this pitch to receive each frame.
+            // The critical section MUST be initialized before we publish
+            // g_stagingCpuBuffer — otherwise a consumer racing in could
+            // EnterCriticalSection on uninitialized memory.
+            if (!g_stagingCpuLockInit) {
+                InitializeCriticalSection(&g_stagingCpuLock);
+                g_stagingCpuLockInit = true;
+            }
+            UINT pitch  = width * 4;
+            SIZE_T bytes = (SIZE_T)pitch * height;
+            void*  buf  = HeapAlloc(GetProcessHeap(), 0, bytes);
+            if (!buf) {
+                KLOG(L"EnsureStereoStage: HeapAlloc(%zu) failed\n", bytes);
+                g_sysmemSurface->Release(); g_sysmemSurface = nullptr;
+            } else {
+                InterlockedExchange(&g_stagingCpuFresh, 0);
+                EnterCriticalSection(&g_stagingCpuLock);
+                g_stagingCpuBuffer = buf;
+                g_stagingCpuPitch  = pitch;
+                LeaveCriticalSection(&g_stagingCpuLock);
+                KLOG(L"EnsureStereoStage: CPU-readback buffer ready (%u bytes, pitch=%u)\n",
+                     (unsigned)bytes, pitch);
+            }
+        }
+    }
+
+    // Publish for Device B (Output_Overlay.cpp). Format is the SHARED
+    // texture's format (always A8R8G8B8 — see CreateTexture call above),
+    // not the BB format, since that's what Device B's OpenSharedResource
+    // sees on the D3D11 side. sharedHandle == nullptr is the signal to
+    // consumers that the CPU path is active.
     g_stagingSharedHandle = sharedHandle;
     g_stagingWidth        = width;
     g_stagingHeight       = height;
-    g_stagingD3DFormat    = (UINT)desc.Format;
+    g_stagingD3DFormat    = (UINT)D3DFMT_A8R8G8B8;
 
     KLOG(L"EnsureStereoStage: published shared handle=%p (non-shared tex=%p, shared tex=%p)\n",
          g_stagingSharedHandle, g_stereoTex, g_sharedTex);
@@ -202,6 +278,15 @@ static void ReleaseStereoStage()
     if (g_stereoTex)     { g_stereoTex->Release();     g_stereoTex     = nullptr; }
     if (g_sharedSurface) { g_sharedSurface->Release(); g_sharedSurface = nullptr; }
     if (g_sharedTex)     { g_sharedTex->Release();     g_sharedTex     = nullptr; }
+    if (g_sysmemSurface) { g_sysmemSurface->Release(); g_sysmemSurface = nullptr; }
+    if (g_stagingCpuBuffer) {
+        if (g_stagingCpuLockInit) EnterCriticalSection(&g_stagingCpuLock);
+        HeapFree(GetProcessHeap(), 0, g_stagingCpuBuffer);
+        g_stagingCpuBuffer = nullptr;
+        g_stagingCpuPitch  = 0;
+        if (g_stagingCpuLockInit) LeaveCriticalSection(&g_stagingCpuLock);
+    }
+    InterlockedExchange(&g_stagingCpuFresh, 0);
     g_stagingSharedHandle = nullptr;
     g_stagingWidth = g_stagingHeight = 0;
     g_stagingD3DFormat = 0;
@@ -225,21 +310,59 @@ static void CopyStageToShared_MaybeSwap(IDirect3DDevice9* device)
 
     if (g_config.swap_eyes) {
         device->StretchRect(g_stereoStage, nullptr, g_sharedSurface, nullptr, D3DTEXF_NONE);
-        return;
+    } else {
+        D3DSURFACE_DESC stDesc;
+        if (FAILED(g_stereoStage->GetDesc(&stDesc))) return;
+        LONG halfW = (LONG)stDesc.Width / 2;
+        LONG h     = (LONG)stDesc.Height;
+
+        RECT leftHalf  = { 0,     0, halfW,             h };
+        RECT rightHalf = { halfW, 0, (LONG)stDesc.Width, h };
+
+        // L source -> R destination
+        device->StretchRect(g_stereoStage, &leftHalf,  g_sharedSurface, &rightHalf, D3DTEXF_NONE);
+        // R source -> L destination
+        device->StretchRect(g_stereoStage, &rightHalf, g_sharedSurface, &leftHalf,  D3DTEXF_NONE);
     }
 
-    D3DSURFACE_DESC stDesc;
-    if (FAILED(g_stereoStage->GetDesc(&stDesc))) return;
-    LONG halfW = (LONG)stDesc.Width / 2;
-    LONG h     = (LONG)stDesc.Height;
-
-    RECT leftHalf  = { 0,     0, halfW,             h };
-    RECT rightHalf = { halfW, 0, (LONG)stDesc.Width, h };
-
-    // L source -> R destination
-    device->StretchRect(g_stereoStage, &leftHalf,  g_sharedSurface, &rightHalf, D3DTEXF_NONE);
-    // R source -> L destination
-    device->StretchRect(g_stereoStage, &rightHalf, g_sharedSurface, &leftHalf,  D3DTEXF_NONE);
+    // CPU-readback handoff. Active only when shared-handle creation failed
+    // (or was bypassed via alternate_capture_mode=0). GetRenderTargetData
+    // pulls g_sharedSurface's contents into the SYSTEMMEM surface; we then
+    // lock and memcpy into the CPU staging buffer for the overlay thread.
+    if (!g_stagingSharedHandle && g_sysmemSurface && g_stagingCpuBuffer) {
+        HRESULT hr = device->GetRenderTargetData(g_sharedSurface, g_sysmemSurface);
+        if (FAILED(hr)) {
+            KLOG_V(L"CopyStageToShared: GetRenderTargetData failed hr=0x%x\n", hr);
+            return;
+        }
+        D3DLOCKED_RECT lr;
+        hr = g_sysmemSurface->LockRect(&lr, nullptr, D3DLOCK_READONLY);
+        if (FAILED(hr)) {
+            KLOG_V(L"CopyStageToShared: LockRect failed hr=0x%x\n", hr);
+            return;
+        }
+        EnterCriticalSection(&g_stagingCpuLock);
+        if (g_stagingCpuBuffer) {
+            // If pitches match, one big memcpy; otherwise row by row.
+            if ((UINT)lr.Pitch == g_stagingCpuPitch) {
+                memcpy(g_stagingCpuBuffer, lr.pBits,
+                       (SIZE_T)g_stagingCpuPitch * g_stagingHeight);
+            } else {
+                const BYTE* src = (const BYTE*)lr.pBits;
+                BYTE*       dst = (BYTE*)g_stagingCpuBuffer;
+                UINT copyBytes = (UINT)(lr.Pitch < (INT)g_stagingCpuPitch
+                                            ? lr.Pitch : g_stagingCpuPitch);
+                for (UINT y = 0; y < g_stagingHeight; ++y) {
+                    memcpy(dst, src, copyBytes);
+                    src += lr.Pitch;
+                    dst += g_stagingCpuPitch;
+                }
+            }
+        }
+        LeaveCriticalSection(&g_stagingCpuLock);
+        g_sysmemSurface->UnlockRect();
+        InterlockedExchange(&g_stagingCpuFresh, 1);
+    }
 }
 
 
@@ -253,24 +376,25 @@ static void CopyStageToShared_MaybeSwap(IDirect3DDevice9* device)
 // Windowed=TRUE requires FullScreen_RefreshRateInHz=0; DX9 will reject
 // non-zero refresh in windowed mode. PresentationInterval is left alone.
 //
-// Sticky viewport lock: when the game's FIRST CreateDevice asked for
-// windowed=TRUE, we record that in s_viewportLockedFromInitialWindowed and
-// thereafter SUPPRESS the BB-dim override on every CreateDevice/Reset for
-// this process. Engines that cache viewport / projection from their initial
-// CreateDevice (notably UE3 — Brothers, Dishonored, etc.) silently keep
-// rendering at the game's original requested dims even after we force a
-// different BB, producing a small inset of the game inside a larger BB
-// ("picture in picture" / "top-left quadrant" failure modes). A game that
-// opens windowed has declared its own dims; respecting them avoids the
-// trap. Games that go straight to fullscreen still get the override —
-// that's the case the override exists for. Set in Hooked_CreateDevice.
+// Sticky viewport lock. When the game's FIRST CreateDevice asked for
+// Windowed=TRUE, the engine has just declared its own resolution — and
+// many engines cache their viewport / projection
+// matrix at that moment and never re-query the BB. We record the fact in
+// s_viewportLockedFromInitialWindowed and thereafter SUPPRESS the BB-dim
+// override on every later CreateDevice/Reset so the engine's cached
+// viewport keeps matching the BB and we don't produce the "picture in
+// picture" / "top-left quadrant" failure. Games that go straight to
+// fullscreen still get the override — that's the case the override
+// exists for. Set in Hooked_CreateDevice.
 static bool s_viewportLockedFromInitialWindowed = false;
 
 static void ApplyPresentParamOverrides(D3DPRESENT_PARAMETERS* pp)
 {
     if (!pp) return;
-    pp->Windowed                   = TRUE;
-    pp->FullScreen_RefreshRateInHz = 0;
+    if (g_config.force_windowed) {
+        pp->Windowed                   = TRUE;
+        pp->FullScreen_RefreshRateInHz = 0;
+    }
     if (s_viewportLockedFromInitialWindowed) return;
     if (g_config.render_width > 0 && g_config.render_height > 0) {
         pp->BackBufferWidth  = g_config.render_width;
@@ -282,6 +406,69 @@ static void ApplyPresentParamOverrides(D3DPRESENT_PARAMETERS* pp)
 static bool ResOverrideActive()
 {
     return g_config.render_width > 0 && g_config.render_height > 0;
+}
+
+
+// Subclass the game HWND's WndProc so we can intercept WM_SETCURSOR and
+// force-hide the cursor. Required for hide_cursor support on games whose
+// own class cursor is IDC_APPSTARTING / IDC_WAIT / similar and gets drawn
+// by Windows whenever the cursor is hit-tested onto the game HWND —
+// which it always is, because our WS_EX_LAYERED|WS_EX_TRANSPARENT overlay
+// routes hit-tests through to the game window beneath. The overlay class
+// cursor never gets a chance to apply.
+//
+// Subclassing the game's WndProc (we're in its process, so this is just
+// SetWindowLongPtr) lets us swallow WM_SETCURSOR before the game's own
+// handler runs, call SetCursor(NULL), and return TRUE so the OS uses our
+// (invisible) choice. Original WndProc is saved for chain-through and
+// restored on Reset / shutdown.
+static WNDPROC s_origGameWndProc = nullptr;
+static HWND    s_subclassedHwnd  = nullptr;
+
+static LRESULT CALLBACK SubclassedGameWndProc(HWND hwnd, UINT msg,
+                                              WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_SETCURSOR && g_config.hide_cursor) {
+        SetCursor(nullptr);
+        return TRUE;
+    }
+    if (s_origGameWndProc)
+        return CallWindowProcW(s_origGameWndProc, hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void MaybeSubclassGameHwnd(HWND hwnd)
+{
+    if (!hwnd || !g_config.hide_cursor) return;
+    if (s_subclassedHwnd == hwnd) return;
+
+    s_origGameWndProc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                                                  (LONG_PTR)SubclassedGameWndProc);
+    if (!s_origGameWndProc) {
+        KLOG(L"  MaybeSubclassGameHwnd: SetWindowLongPtr failed err=0x%x\n", GetLastError());
+        return;
+    }
+    s_subclassedHwnd = hwnd;
+    KLOG(L"  subclassed game HWND %p for WM_SETCURSOR interception (hide_cursor)\n", hwnd);
+
+    // Also swap the game's class cursor to invisible. DefWindowProc's
+    // default WM_SETCURSOR handler uses the WINDOW CLASS's hCursor (not
+    // anything WndProc-routed) — so for games whose class cursor is
+    // IDC_APPSTARTING / IDC_WAIT, our WndProc intercept alone isn't
+    // enough; we need to overwrite the class entry so the OS default
+    // path also picks our invisible one. SetClassLongPtrW on a window
+    // we don't own is allowed because we're injected into the game's
+    // process.
+    BYTE andMask[32 * 4];
+    BYTE xorMask[32 * 4];
+    memset(andMask, 0xFF, sizeof(andMask));
+    memset(xorMask, 0x00, sizeof(xorMask));
+    HCURSOR hInvisible = CreateCursor(GetModuleHandleW(nullptr), 0, 0,
+                                      32, 32, andMask, xorMask);
+    if (hInvisible) {
+        SetClassLongPtrW(hwnd, GCLP_HCURSOR, (LONG_PTR)hInvisible);
+        KLOG(L"  set game class hCursor to invisible (was overriding IDC_APPSTARTING)\n");
+    }
 }
 
 
@@ -366,8 +553,7 @@ static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
                 // into the non-shared 2W×H staging surface in one
                 // StretchRect, then we copy to the shared texture for
                 // Device B. Both StretchRects happen while ReverseStereo-
-                // BlitControl is TRUE, per bo3b's original pattern (see
-                // InProc_DX9.cpp:319-329 in the original DeviarePlugin).
+                // BlitControl is TRUE.
                 NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, true);
                 This->StretchRect(backBuffer, nullptr, g_stereoStage, nullptr, D3DTEXF_NONE);
                 CopyStageToShared_MaybeSwap(This);
@@ -443,23 +629,37 @@ static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
     // Reset can shrink the HWND back to the new BB size — re-assert.
     MaybeResizeGameHwndToMonitor(g_gameFocusHwnd);
 
+    // Re-assert subclass (defensive — Reset shouldn't swap WndProcs, but
+    // if the game's UI thread did anything to its window during reset
+    // we want to be sure we're still on the chain).
+    MaybeSubclassGameHwnd(g_gameFocusHwnd);
+
     return resetHr;
 }
 
 
 // --------------------------------------------------------------------------
-// DX9Ex compat hooks lifted verbatim from InProc_DX9.cpp.
-// These force D3DPOOL_MANAGED → D3DPOOL_DEFAULT and add D3DUSAGE_DYNAMIC
-// where required, because the game's CreateDevice silently became an Ex
-// device and Ex doesn't accept MANAGED pool.
+// DX9Ex compat hooks. Hooked_Direct3DCreate9 silently upgrades the game's
+// IDirect3D9 to Ex when alternate_capture_mode=1 (the default — needed
+// for the shared-handle handoff and for NvAPI on older driver builds).
+// Ex rejects D3DPOOL_MANAGED, so we rewrite MANAGED → DEFAULT for every
+// game-side resource creation AND add D3DUSAGE_DYNAMIC to non-RT/non-DS
+// resources so the resulting DEFAULT-pool resource remains CPU-Lockable
+// (games originally choosing MANAGED typically Lock during init and
+// sometimes again to refresh).
+//
+// When alternate_capture_mode=0 the game's device stays non-Ex, MANAGED
+// is legal, and the entire rewrite is a pure pass-through.
 
 static HRESULT __stdcall Hooked_CreateTexture(IDirect3DDevice9* This,
     UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format,
     D3DPOOL Pool, IDirect3DTexture9** ppTexture, HANDLE* pSharedHandle)
 {
-    if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
-    int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
-    if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
+    if (g_config.alternate_capture_mode) {
+        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+        int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
+        if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
+    }
     return pOrigCreateTexture(This, Width, Height, Levels, Usage, Format, Pool, ppTexture, pSharedHandle);
 }
 
@@ -467,9 +667,11 @@ static HRESULT __stdcall Hooked_CreateCubeTexture(IDirect3DDevice9* This,
     UINT EdgeLength, UINT Levels, DWORD Usage, D3DFORMAT Format,
     D3DPOOL Pool, IDirect3DCubeTexture9** ppCubeTexture, HANDLE* pSharedHandle)
 {
-    if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
-    int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
-    if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
+    if (g_config.alternate_capture_mode) {
+        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+        int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
+        if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
+    }
     return pOrigCreateCubeTexture(This, EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture, pSharedHandle);
 }
 
@@ -477,9 +679,11 @@ static HRESULT __stdcall Hooked_CreateVolumeTexture(IDirect3DDevice9* This,
     UINT Width, UINT Height, UINT Depth, UINT Levels, DWORD Usage,
     D3DFORMAT Format, D3DPOOL Pool, IDirect3DVolumeTexture9** ppVolumeTexture, HANDLE* pSharedHandle)
 {
-    if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
-    int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
-    if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
+    if (g_config.alternate_capture_mode) {
+        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+        int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
+        if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
+    }
     return pOrigCreateVolumeTexture(This, Width, Height, Depth, Levels, Usage, Format, Pool, ppVolumeTexture, pSharedHandle);
 }
 
@@ -487,7 +691,7 @@ static HRESULT __stdcall Hooked_CreateOffscreenPlainSurface(IDirect3DDevice9* Th
     UINT Width, UINT Height, D3DFORMAT Format, D3DPOOL Pool,
     IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle)
 {
-    if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+    if (g_config.alternate_capture_mode && Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
     return pOrigCreateOffscreenPlainSurface(This, Width, Height, Format, Pool, ppSurface, pSharedHandle);
 }
 
@@ -495,8 +699,10 @@ static HRESULT __stdcall Hooked_CreateVertexBuffer(IDirect3DDevice9* This,
     UINT Length, DWORD Usage, DWORD FVF, D3DPOOL Pool,
     IDirect3DVertexBuffer9** ppVertexBuffer, HANDLE* pSharedHandle)
 {
-    if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
-    Usage |= D3DUSAGE_DYNAMIC;
+    if (g_config.alternate_capture_mode) {
+        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+        Usage |= D3DUSAGE_DYNAMIC;
+    }
     return pOrigCreateVertexBuffer(This, Length, Usage, FVF, Pool, ppVertexBuffer, pSharedHandle);
 }
 
@@ -504,8 +710,10 @@ static HRESULT __stdcall Hooked_CreateIndexBuffer(IDirect3DDevice9* This,
     UINT Length, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
     IDirect3DIndexBuffer9** ppIndexBuffer, HANDLE* pSharedHandle)
 {
-    if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
-    Usage |= D3DUSAGE_DYNAMIC;
+    if (g_config.alternate_capture_mode) {
+        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+        Usage |= D3DUSAGE_DYNAMIC;
+    }
     return pOrigCreateIndexBuffer(This, Length, Usage, Format, Pool, ppIndexBuffer, pSharedHandle);
 }
 
@@ -519,10 +727,10 @@ static HRESULT __stdcall Hooked_CreateIndexBuffer(IDirect3DDevice9* This,
 // Active only when render_width × render_height are both non-zero. With
 // 0,0 (default), each hook is a transparent pass-through.
 //
-// UE3 family (Brothers - A Tale of Two Sons) reads a saved-config res but
-// then probes the desktop; if the desktop is larger, it ignores the config
-// and renders at the desktop. These hooks make the desktop "look smaller"
-// so UE3's probe sees the configured res and uses it.
+// Some games read a saved-config resolution but then also probe the
+// desktop via these APIs and prefer whichever is larger. Lying about
+// the desktop size when render_width/height are set forces those games
+// to render at the configured resolution.
 
 static HRESULT __stdcall Hooked_GetAdapterDisplayMode(IDirect3D9* This,
                                                       UINT Adapter,
@@ -649,9 +857,13 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
         }
     }
 
+    MaybeSubclassGameHwnd(g_gameFocusHwnd);
     MaybeResizeGameHwndToMonitor(g_gameFocusHwnd);
 
-    if (pOrigPresent == nullptr && pDevice9) {
+    if (!g_config.install_device_hooks) {
+        KLOG(L"  install_device_hooks=0 — skipping Present/Reset/Create* hooks\n");
+    }
+    if (g_config.install_device_hooks && pOrigPresent == nullptr && pDevice9) {
         SIZE_T hook_id = 0;
         DWORD dwOsErr;
 
@@ -696,41 +908,51 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
 
 
 // Install the CreateDevice + display-mode-enumeration vtable hooks on the
-// returned IDirect3D9Ex object. Idempotent — guarded by pOrigCreateDevice so
-// the second caller (whichever of Direct3DCreate9 / Direct3DCreate9Ex runs
-// second) no-ops. Vtable address is shared between IDirect3D9 and
-// IDirect3D9Ex so the cast is safe.
+// returned IDirect3D9 (or Ex) object. Idempotent — guarded by
+// pOrigCreateDevice so the second caller (whichever of Direct3DCreate9 /
+// Direct3DCreate9Ex runs second) no-ops. Only touches vtable entries that
+// exist on both interfaces.
 //
 // Exposed via Core.h as DX9_InstallVtableHooksOn so the proxy DLL's real
 // Direct3DCreate9 / Direct3DCreate9Ex exports can install our hooks on the
 // object before handing it back to the EXE.
-void DX9_InstallVtableHooksOn(IDirect3D9Ex* pDX9Ex)
+void DX9_InstallVtableHooksOn(IDirect3D9* pDX9)
 {
-    if (pOrigCreateDevice != nullptr || !pDX9Ex) return;
+    if (pOrigCreateDevice != nullptr || !pDX9) return;
+    if (!g_config.install_d3d9_vtable_hooks) {
+        KLOG(L"DX9_InstallVtableHooksOn: install_d3d9_vtable_hooks=0 — skipping\n");
+        return;
+    }
 
     SIZE_T hook_id = 0;
     DWORD dwOsErr;
 
     dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateDevice,
-                               lpvtbl_CreateDevice((IDirect3D9*)pDX9Ex),
+                               lpvtbl_CreateDevice(pDX9),
                                Hooked_CreateDevice, 0);
     if (FAILED(dwOsErr)) KLOG(L"Failed to hook IDirect3D9::CreateDevice 0x%x\n", dwOsErr);
     else                 KLOG(L"Hooked IDirect3D9::CreateDevice\n");
 
+    if (!g_config.install_d3d9_display_mode_hooks) {
+        KLOG(L"DX9_InstallVtableHooksOn: install_d3d9_display_mode_hooks=0 "
+             L"— skipping GetAdapterDisplayMode/EnumAdapterModes/GetAdapterModeCount\n");
+        return;
+    }
+
     dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterDisplayMode,
-                               lpvtbl_GetAdapterDisplayMode((IDirect3D9*)pDX9Ex),
+                               lpvtbl_GetAdapterDisplayMode(pDX9),
                                Hooked_GetAdapterDisplayMode, 0);
     if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterDisplayMode 0x%x\n", dwOsErr);
     else                 KLOG(L"Hooked IDirect3D9::GetAdapterDisplayMode\n");
 
     dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigEnumAdapterModes,
-                               lpvtbl_EnumAdapterModes((IDirect3D9*)pDX9Ex),
+                               lpvtbl_EnumAdapterModes(pDX9),
                                Hooked_EnumAdapterModes, 0);
     if (FAILED(dwOsErr)) KLOG(L"Failed to hook EnumAdapterModes 0x%x\n", dwOsErr);
     else                 KLOG(L"Hooked IDirect3D9::EnumAdapterModes\n");
 
     dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterModeCount,
-                               lpvtbl_GetAdapterModeCount((IDirect3D9*)pDX9Ex),
+                               lpvtbl_GetAdapterModeCount(pDX9),
                                Hooked_GetAdapterModeCount, 0);
     if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterModeCount 0x%x\n", dwOsErr);
     else                 KLOG(L"Hooked IDirect3D9::GetAdapterModeCount\n");
@@ -738,14 +960,37 @@ void DX9_InstallVtableHooksOn(IDirect3D9Ex* pDX9Ex)
 
 
 // --------------------------------------------------------------------------
-// Hooked Direct3DCreate9 — quietly upgrades the game's IDirect3D9 to
-// IDirect3D9Ex. The returned Ex object is castable to plain IDirect3D9 from
-// the game's perspective. Required so the device that comes out of
-// CreateDevice is Ex (NvAPI_Stereo_CreateHandleFromIUnknown demands Ex).
+// Hooked Direct3DCreate9. With alternate_capture_mode=1 (default) we
+// quietly upgrade the game's IDirect3D9 to IDirect3D9Ex (castable to
+// plain IDirect3D9 from the game's perspective). Two reasons:
+//   1. CreateTexture with pSharedHandle != NULL — the cross-API handoff
+//      to Device B — is a D3D9Ex-only feature; non-Ex devices return
+//      D3DERR_INVALIDCALL when you ask for a shared resource.
+//   2. Some NvAPI driver builds want an Ex device for stereo handle
+//      creation.
+// Side effect: Ex rejects D3DPOOL_MANAGED. The hooked Create* methods
+// below rewrite MANAGED → DEFAULT (+ DYNAMIC on non-RT/non-DS) to keep
+// games that think they're on plain DX9 working.
+//
+// With alternate_capture_mode=0, we hand back the plain non-Ex device
+// untouched. The shared-handle path becomes unavailable, so
+// EnsureStereoStage falls through to the CPU-readback handoff (see
+// Hooks_DX9.cpp:: g_sysmemSurface / g_stagingCpuBuffer).
 
 static IDirect3D9* __stdcall Hooked_Direct3DCreate9(UINT SDKVersion)
 {
     KLOG(L"Hooked_Direct3DCreate9 SDK=%d\n", SDKVersion);
+
+    if (!g_config.alternate_capture_mode) {
+        KLOG(L"  alternate_capture_mode=0 — keeping plain DX9 device\n");
+        IDirect3D9* pDX9 = pOrigDirect3DCreate9(SDKVersion);
+        if (!pDX9) {
+            KLOG(L"  pOrigDirect3DCreate9 returned NULL\n");
+            return nullptr;
+        }
+        DX9_InstallVtableHooksOn(pDX9);
+        return pDX9;
+    }
 
     // Resolve Direct3DCreate9Ex from system d3d9.dll via GetProcAddress
     // rather than linking d3d9.lib for it. Linking the import conflicts
@@ -769,7 +1014,7 @@ static IDirect3D9* __stdcall Hooked_Direct3DCreate9(UINT SDKVersion)
         return pOrigDirect3DCreate9(SDKVersion);
     }
 
-    DX9_InstallVtableHooksOn(pDX9Ex);
+    DX9_InstallVtableHooksOn((IDirect3D9*)pDX9Ex);
     return (IDirect3D9*)pDX9Ex;
 }
 

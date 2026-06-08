@@ -74,8 +74,19 @@ void Config_Load(Config& cfg)
 
     cfg.defeat_directflip = GetPrivateProfileIntW(L"render", L"defeat_directflip", 1, iniPath);
 
+    cfg.force_windowed = GetPrivateProfileIntW(L"render", L"force_windowed", 1, iniPath);
+
+    cfg.confine_cursor = GetPrivateProfileIntW(L"render", L"confine_cursor", 0, iniPath);
+    cfg.hide_cursor    = GetPrivateProfileIntW(L"render", L"hide_cursor",    0, iniPath);
+
+    cfg.alternate_capture_mode = GetPrivateProfileIntW(L"render", L"alternate_capture_mode", 1, iniPath);
+
     cfg.render_width  = (UINT)GetPrivateProfileIntW(L"render", L"render_width",  0, iniPath);
     cfg.render_height = (UINT)GetPrivateProfileIntW(L"render", L"render_height", 0, iniPath);
+
+    cfg.install_device_hooks            = GetPrivateProfileIntW(L"debug", L"install_device_hooks",            1, iniPath);
+    cfg.install_d3d9_vtable_hooks       = GetPrivateProfileIntW(L"debug", L"install_d3d9_vtable_hooks",       1, iniPath);
+    cfg.install_d3d9_display_mode_hooks = GetPrivateProfileIntW(L"debug", L"install_d3d9_display_mode_hooks", 1, iniPath);
 
     wchar_t logRel[MAX_PATH] = L"";
     GetPrivateProfileStringW(L"debug", L"log_file", L"3dvision4all.log",

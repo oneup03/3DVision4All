@@ -20,12 +20,12 @@
 //
 // Direct3DCreate9 / Direct3DCreate9Ex are exported as REAL FUNCTIONS (not
 // forwarders) — defined in DllMain.cpp as Proxy_Direct3DCreate9 /
-// Proxy_Direct3DCreate9Ex. Some games (Alice: Madness Returns is the
-// known case) get their EXE import table patched by HelixMod / 3D-fix
-// installers to pull the D3D9 entry points through DSOUND. Real exports
-// give us a defined hook point: we install our IDirect3D9 vtable hooks on
-// the returned object before handing it back to the EXE, so HelixMod's
-// per-game fix AND our SbS-overlay composition both run.
+// Proxy_Direct3DCreate9Ex. Some games get their EXE import table patched
+// by HelixMod / 3D-fix installers to pull the D3D9 entry points through
+// DSOUND. Real exports give us a defined hook point: we install our
+// IDirect3D9 vtable hooks on the returned object before handing it back
+// to the EXE, so HelixMod's per-game fix AND our SbS-overlay composition
+// both run.
 //
 // Harmless when no patched EXE is involved — the exports just sit unused.
 // WINAPI is __stdcall, which on x86 decorates the OBJ symbol as

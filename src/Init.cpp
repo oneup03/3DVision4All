@@ -34,10 +34,9 @@ static HMODULE s_selfModule = nullptr;
 
 
 // --------------------------------------------------------------------------
-// NvAPI SetDriverMode hook — API-agnostic, lifted from
-// DeviarePlugin/InProc_DX11.cpp:665-739. We only need this to flip
-// g_directMode so the Present hook chooses the per-eye SetActiveEye path
-// instead of the ReverseStereoBlit path.
+// NvAPI SetDriverMode hook — API-agnostic. We only need this to flip
+// g_directMode so the Present hook chooses the per-eye SetActiveEye
+// path instead of the ReverseStereoBlit path.
 
 typedef NvAPI_Status(__cdecl *tNvAPI_Stereo_SetDriverMode)(NV_STEREO_DRIVER_MODE mode);
 static tNvAPI_Stereo_SetDriverMode pOrigNvAPI_Stereo_SetDriverMode = nullptr;
@@ -113,6 +112,13 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
     KLOG(L"  mode          = %d\n", (int)g_config.mode);
     KLOG(L"  swap_eyes     = %d\n", g_config.swap_eyes ? 1 : 0);
     KLOG(L"  defeat_directflip = %d\n", g_config.defeat_directflip);
+    KLOG(L"  force_windowed = %d\n", g_config.force_windowed);
+    KLOG(L"  confine_cursor = %d\n", g_config.confine_cursor);
+    KLOG(L"  hide_cursor    = %d\n", g_config.hide_cursor);
+    KLOG(L"  install_device_hooks = %d\n", g_config.install_device_hooks);
+    KLOG(L"  install_d3d9_vtable_hooks = %d\n", g_config.install_d3d9_vtable_hooks);
+    KLOG(L"  install_d3d9_display_mode_hooks = %d\n", g_config.install_d3d9_display_mode_hooks);
+    KLOG(L"  alternate_capture_mode = %d\n", g_config.alternate_capture_mode);
     KLOG(L"  render        = %ux%u (0,0 = no resolution override)\n",
          g_config.render_width, g_config.render_height);
     KLOG(L"  log_path      = %s\n", g_config.log_path);
@@ -132,10 +138,10 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
 
 // --------------------------------------------------------------------------
 // Win32 display-mode enumeration hooks. Lie to the game about the desktop
-// resolution when render_width/height are both non-zero. UE3 family games
-// (Brothers - A Tale of Two Sons) ignore their saved-config resolution and
-// probe the desktop via these APIs — making the desktop "look smaller"
-// here forces them to actually render at the configured size.
+// resolution when render_width/height are both non-zero. Some games
+// ignore their saved-config resolution and probe the desktop via these
+// APIs — making the desktop "look smaller" forces them to render at the
+// configured size.
 
 typedef int  (WINAPI *t_GetSystemMetrics)(int);
 typedef BOOL (WINAPI *t_EnumDisplaySettingsW)(LPCWSTR, DWORD, DEVMODEW*);
@@ -173,8 +179,7 @@ static int WINAPI Hooked_GetSystemMetrics(int nIndex)
 // Both EnumDisplaySettings overrides leave non-resolution fields (refresh,
 // orientation, color depth, etc.) alone and only rewrite width/height. We
 // override for ANY iModeNum — including ENUM_CURRENT_SETTINGS (the "what
-// is the desktop right now" query that UE3 uses) and 0..N enumeration
-// callbacks.
+// is the desktop right now" query) and 0..N enumeration callbacks.
 static BOOL WINAPI Hooked_EnumDisplaySettingsW(LPCWSTR lpszDeviceName,
                                                 DWORD iModeNum,
                                                 DEVMODEW* lpDevMode)
