@@ -122,8 +122,8 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
     KLOG(L"  alternate_capture_mode = %d\n", g_config.alternate_capture_mode);
     KLOG(L"  render        = %ux%u (0,0 = no resolution override)\n",
          g_config.render_width, g_config.render_height);
-    KLOG(L"  staging_per_eye = %ux%u (0,0 = no cap)\n",
-         g_config.staging_per_eye_width, g_config.staging_per_eye_height);
+    KLOG(L"  copy          = %ux%u (0,0 = no cap)\n",
+         g_config.copy_width, g_config.copy_height);
     KLOG(L"  log_path      = %s\n", g_config.log_path);
 
 #ifdef _DEBUG

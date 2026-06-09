@@ -168,13 +168,13 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
     // to match the BB. But the StretchRect into g_sharedSurface[] can
     // downsample on the GPU, which is the cheap part; the downstream
     // readback / upload pipeline then carries far fewer pixels. See the
-    // staging_per_eye_* comment in Core.h.
+    // copy_* comment in Core.h.
     UINT stagingWidth  = width;
     UINT stagingHeight = height;
-    if (g_config.staging_per_eye_width  > 0 &&
-        g_config.staging_per_eye_height > 0) {
-        UINT cw = g_config.staging_per_eye_width  * 2;
-        UINT ch = g_config.staging_per_eye_height;
+    if (g_config.copy_width  > 0 &&
+        g_config.copy_height > 0) {
+        UINT cw = g_config.copy_width  * 2;
+        UINT ch = g_config.copy_height;
         if (cw < stagingWidth && ch < stagingHeight) {
             stagingWidth  = cw & ~1U;          // keep even for the half-split math
             stagingHeight = ch;

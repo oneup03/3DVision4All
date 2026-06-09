@@ -86,8 +86,8 @@ void Config_Load(Config& cfg)
     cfg.render_width  = (UINT)GetPrivateProfileIntW(L"render", L"render_width",  0, iniPath);
     cfg.render_height = (UINT)GetPrivateProfileIntW(L"render", L"render_height", 0, iniPath);
 
-    cfg.staging_per_eye_width  = (UINT)GetPrivateProfileIntW(L"render", L"staging_per_eye_width",  0, iniPath);
-    cfg.staging_per_eye_height = (UINT)GetPrivateProfileIntW(L"render", L"staging_per_eye_height", 0, iniPath);
+    cfg.copy_width  = (UINT)GetPrivateProfileIntW(L"render", L"copy_width",  0, iniPath);
+    cfg.copy_height = (UINT)GetPrivateProfileIntW(L"render", L"copy_height", 0, iniPath);
 
     cfg.install_device_hooks            = GetPrivateProfileIntW(L"debug", L"install_device_hooks",            1, iniPath);
     cfg.install_d3d9_vtable_hooks       = GetPrivateProfileIntW(L"debug", L"install_d3d9_vtable_hooks",       1, iniPath);

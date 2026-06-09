@@ -180,19 +180,19 @@ struct Config {
     // StretchRect for ~16 ms and halving framerate.
     //
     // When BOTH per-eye dims are non-zero, the StretchRect into the
-    // staging downsamples on the GPU to (2*staging_per_eye_width,
-    // staging_per_eye_height), so the readback drains much faster.
+    // staging downsamples on the GPU to (2*copy_width,
+    // copy_height), so the readback drains much faster.
     // Each panel-half in the compose shader already gets resampled from
     // (staging_width/2, staging_height) to panel-half, so as long as
-    // staging_per_eye_width is at least the panel-half width and
-    // staging_per_eye_height is at least the panel height, the cap is
+    // copy_width is at least the panel-half width and
+    // copy_height is at least the panel height, the cap is
     // essentially lossless (e.g. on a 4K panel, 1920x2160 per eye is
     // pixel-perfect; 1920x1080 trades half the vertical detail for a
     // ~4× readback speedup).
     //
     // Default 0,0 = no cap.
-    UINT       staging_per_eye_width  = 0;
-    UINT       staging_per_eye_height = 0;
+    UINT       copy_width  = 0;
+    UINT       copy_height = 0;
 
     // Optional: stamp this into the game's CreateDevice/Reset present
     // params, and feed the same dims back to display-mode probes
