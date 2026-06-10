@@ -84,7 +84,7 @@
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
     <Link>
       <AdditionalDependencies>nvapi.lib;SR-md.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(SolutionDir)third_party\nvapi\x86;$(SolutionDir)third_party\SR-lib\SR-lib\lib\x32\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)third_party\nvapi\x86;$(SolutionDir)third_party\SR-lib\SR-lib\lib\x86\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <DelayLoadDLLs>SimulatedRealityCore32.dll;SimulatedRealityDirectX32.dll;SimulatedRealityOpenGL32.dll;opencv_world343.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
