@@ -128,6 +128,84 @@ static HRESULT (__stdcall *pOrigCreateIndexBuffer)(
     IDirect3DDevice9*, UINT, DWORD, D3DFORMAT, D3DPOOL,
     IDirect3DIndexBuffer9**, HANDLE*) = nullptr;
 
+// MANAGED-emulation hook state — see the Hooked_CreateTexture comment
+// for the rationale. Hooks are installed lazily on the first successful
+// Create* of each resource type (one vtable patch covers all instances
+// of that interface created off the same device).
+static HRESULT (__stdcall *pOrigTextureLockRect)(
+    IDirect3DTexture9*, UINT, D3DLOCKED_RECT*, const RECT*, DWORD) = nullptr;
+static HRESULT (__stdcall *pOrigTextureUnlockRect)(
+    IDirect3DTexture9*, UINT) = nullptr;
+static ULONG (__stdcall *pOrigTextureRelease)(
+    IDirect3DTexture9*) = nullptr;
+// One install flag per resource type covers the Lock+Unlock+Release
+// trio — they're installed together under a single guarded block.
+static volatile LONG g_textureLockHooked = 0;
+
+static HRESULT (__stdcall *pOrigVBLock)(
+    IDirect3DVertexBuffer9*, UINT, UINT, void**, DWORD) = nullptr;
+static HRESULT (__stdcall *pOrigVBUnlock)(
+    IDirect3DVertexBuffer9*) = nullptr;
+static ULONG (__stdcall *pOrigVBRelease)(
+    IDirect3DVertexBuffer9*) = nullptr;
+static HRESULT (__stdcall *pOrigIBLock)(
+    IDirect3DIndexBuffer9*, UINT, UINT, void**, DWORD) = nullptr;
+static HRESULT (__stdcall *pOrigIBUnlock)(
+    IDirect3DIndexBuffer9*) = nullptr;
+static ULONG (__stdcall *pOrigIBRelease)(
+    IDirect3DIndexBuffer9*) = nullptr;
+static volatile LONG g_vbLockHooked = 0;
+static volatile LONG g_ibLockHooked = 0;
+
+// Bypass counter for VB/IB Lock/Unlock hooks. When > 0 our hooks
+// short-circuit to the original (un-redirected) Lock/Unlock so we can
+// safely call This->Lock from inside our own Unlock hook for the
+// write-back path. Set/cleared around the call site.
+//
+// PER-THREAD. Multi-threaded D3D9 (D3DCREATE_MULTITHREADED) is common
+// in AAA games — if this were global, thread A in Unlock would skip
+// the shadow redirect for thread B's concurrent Lock on a DIFFERENT
+// VB, corrupting vertex data and causing polygon explosions.
+//
+// Why this is needed: calling pOrigVB*Lock directly with the shadow as
+// `This` parameter empirically returns success but null pBits — the
+// only reliable Lock path is via the vtable (shadow->Lock(...)) which
+// re-enters our hook. For the real VB we need a way to Lock it WITHOUT
+// re-entering, hence this flag.
+__declspec(thread) static int g_vbHookBypass = 0;
+
+// Private-data key for the ShadowOwner wrapper attached to each game-
+// facing resource we rewrote from MANAGED. Stored via
+// SetPrivateData(D3DSPD_IUNKNOWN); the runtime AddRefs the wrapper and
+// Releases it when the game finally Releases the real resource. Our
+// wrapper's Release at refcount 0 then Releases the underlying shadow.
+// {B7F12A4D-8C3E-4B2A-9E5F-6D8A1B3C9F2E}
+static const GUID kShadowGuid =
+    { 0xb7f12a4d, 0x8c3e, 0x4b2a,
+      { 0x9e, 0x5f, 0x6d, 0x8a, 0x1b, 0x3c, 0x9f, 0x2e } };
+
+// Fetch a shadow resource pointer that was previously attached to
+// `resource` via AttachShadow. The shadow pointer is stored as raw
+// bytes (not D3DSPD_IUNKNOWN) — GetPrivateData does NO AddRef and the
+// caller must NOT Release.
+//
+// Why raw bytes instead of D3DSPD_IUNKNOWN's auto-cleanup: the Ex
+// runtime crashes inside SetPrivateData when called with
+// D3DSPD_IUNKNOWN, both with a real D3D9 resource AND with a custom
+// IUnknown wrapper. Cause unknown. We instead hook each resource's
+// Release method and release the shadow when the real resource's
+// refcount reaches zero — see Hooked_TextureRelease / Hooked_VBRelease
+// / Hooked_IBRelease.
+template <typename TResource>
+static TResource* GetShadow(TResource* resource)
+{
+    TResource* shadow = nullptr;
+    DWORD size = sizeof(shadow);
+    if (FAILED(resource->GetPrivateData(kShadowGuid, &shadow, &size)) || !shadow)
+        return nullptr;
+    return shadow;
+}
+
 
 // --------------------------------------------------------------------------
 // 2W×H stereo staging creation. Sized from the current backbuffer at
@@ -844,33 +922,294 @@ static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
 // DX9Ex compat hooks. Hooked_Direct3DCreate9 silently upgrades the game's
 // IDirect3D9 to Ex when alternate_capture_mode=1 (the default — needed
 // for the shared-handle handoff and for NvAPI on older driver builds).
-// Ex rejects D3DPOOL_MANAGED, so we rewrite MANAGED → DEFAULT for every
-// game-side resource creation AND add D3DUSAGE_DYNAMIC to non-RT/non-DS
-// resources so the resulting DEFAULT-pool resource remains CPU-Lockable
-// (games originally choosing MANAGED typically Lock during init and
-// sometimes again to refresh).
+// Ex rejects D3DPOOL_MANAGED, so we rewrite MANAGED → DEFAULT and pair
+// each rewritten resource with a SYSTEMMEM "shadow" of the same size:
+// the Lock/Unlock hooks redirect game Locks to the shadow, and on
+// Unlock we push the shadow's contents into the real DEFAULT resource
+// (UpdateTexture for textures, Lock+memcpy+Unlock for VB/IB — D3D9
+// has no UpdateBuffer). This emulates MANAGED's Lockable + content-
+// preserved semantics that games (UE3, others) depend on; without it
+// the rewrite to DEFAULT+DYNAMIC visibly breaks games that do non-
+// DISCARD Locks expecting prior content to survive.
 //
 // When alternate_capture_mode=0 the game's device stays non-Ex, MANAGED
 // is legal, and the entire rewrite is a pure pass-through.
+
+// IDirect3DTexture9::LockRect hook: redirect to the shadow if one is
+// attached, else pass through.
+static HRESULT __stdcall Hooked_TextureLockRect(IDirect3DTexture9* This,
+    UINT Level, D3DLOCKED_RECT* pLockedRect, const RECT* pRect, DWORD Flags)
+{
+    if (g_config.alternate_capture_mode) {
+        if (IDirect3DTexture9* shadow = GetShadow(This))
+            return shadow->LockRect(Level, pLockedRect, pRect, Flags);
+    }
+    return pOrigTextureLockRect(This, Level, pLockedRect, pRect, Flags);
+}
+
+// IDirect3DTexture9::UnlockRect hook: unlock the shadow then
+// UpdateTexture(shadow → real). SYSTEMMEM auto-tracks dirty rects from
+// Lock/Unlock; UpdateTexture only copies those, so partial Locks stay
+// cheap.
+static HRESULT __stdcall Hooked_TextureUnlockRect(IDirect3DTexture9* This,
+    UINT Level)
+{
+    if (g_config.alternate_capture_mode) {
+        if (IDirect3DTexture9* shadow = GetShadow(This)) {
+            HRESULT hr = shadow->UnlockRect(Level);
+            IDirect3DDevice9* dev = nullptr;
+            if (SUCCEEDED(This->GetDevice(&dev)) && dev) {
+                dev->UpdateTexture(shadow, This);
+                dev->Release();
+            }
+            return hr;
+        }
+    }
+    return pOrigTextureUnlockRect(This, Level);
+}
+
+// Release hooks for textures / VBs / IBs — when the game's Release
+// brings the real resource's refcount to zero, release the shadow it
+// was paired with. Reads the shadow pointer BEFORE forwarding to the
+// original Release, because the resource is destroyed by then and any
+// further access via `This` (including GetPrivateData) would crash.
+static ULONG __stdcall Hooked_TextureRelease(IDirect3DTexture9* This)
+{
+    IDirect3DTexture9* shadow = nullptr;
+    if (g_config.alternate_capture_mode)
+        shadow = GetShadow(This);
+    ULONG refs = pOrigTextureRelease(This);
+    if (refs == 0 && shadow) shadow->Release();
+    return refs;
+}
+
+// MANAGED-emulation hooks for IDirect3DVertexBuffer9 / IndexBuffer9.
+//
+// Lock: forward to the SYSTEMMEM shadow with DYNAMIC-only flags
+// (DISCARD/NOOVERWRITE) stripped — SYSTEMMEM rejects those. The shadow
+// preserves contents across Locks, which is the MANAGED semantic the
+// game depends on.
+//
+// Unlock: unlock the shadow, then write its full contents into the
+// real DEFAULT+DYNAMIC buffer via Lock(DISCARD)+memcpy+Unlock. D3D9
+// has no UpdateBuffer, so this manual round-trip is the only path.
+//
+// Two recursion gotchas, both handled here:
+//   (a) shadow->Lock/Unlock re-enter our hook. Harmless because the
+//       shadow has no nested shadow — GetShadowOwner returns nullptr,
+//       falling through to pOrigVB*. Calling pOrigVB*Lock directly
+//       with `shadow` as `This` empirically returns success but null
+//       pBits — the vtable round-trip is the only reliable path for
+//       the shadow. Wasteful but correct.
+//   (b) This->Lock for the writeback also re-enters our hook, which
+//       would redirect back to the (already locked) shadow.
+//       g_vbHookBypass short-circuits the hook for the writeback.
+static HRESULT __stdcall Hooked_VBLock(IDirect3DVertexBuffer9* This,
+    UINT OffsetToLock, UINT SizeToLock, void** ppbData, DWORD Flags)
+{
+    if (g_vbHookBypass > 0)
+        return pOrigVBLock(This, OffsetToLock, SizeToLock, ppbData, Flags);
+    if (g_config.alternate_capture_mode) {
+        if (IDirect3DVertexBuffer9* shadow = GetShadow(This)) {
+            DWORD shadowFlags = Flags & ~(D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE);
+            return shadow->Lock(OffsetToLock, SizeToLock, ppbData, shadowFlags);
+        }
+    }
+    return pOrigVBLock(This, OffsetToLock, SizeToLock, ppbData, Flags);
+}
+
+static HRESULT __stdcall Hooked_VBUnlock(IDirect3DVertexBuffer9* This)
+{
+    if (g_vbHookBypass > 0)
+        return pOrigVBUnlock(This);
+    if (g_config.alternate_capture_mode) {
+        if (IDirect3DVertexBuffer9* shadow = GetShadow(This)) {
+            HRESULT hr = shadow->Unlock();
+            D3DVERTEXBUFFER_DESC desc = {};
+            if (SUCCEEDED(This->GetDesc(&desc))) {
+                void* shadowPtr = nullptr;
+                void* realPtr   = nullptr;
+                if (SUCCEEDED(shadow->Lock(0, 0, &shadowPtr, D3DLOCK_READONLY)) && shadowPtr) {
+                    ++g_vbHookBypass;
+                    HRESULT lhr = This->Lock(0, 0, &realPtr, D3DLOCK_DISCARD);
+                    --g_vbHookBypass;
+                    if (SUCCEEDED(lhr) && realPtr) {
+                        memcpy(realPtr, shadowPtr, desc.Size);
+                        ++g_vbHookBypass;
+                        This->Unlock();
+                        --g_vbHookBypass;
+                    }
+                    shadow->Unlock();
+                }
+            }
+            return hr;
+        }
+    }
+    return pOrigVBUnlock(This);
+}
+
+static HRESULT __stdcall Hooked_IBLock(IDirect3DIndexBuffer9* This,
+    UINT OffsetToLock, UINT SizeToLock, void** ppbData, DWORD Flags)
+{
+    if (g_vbHookBypass > 0)
+        return pOrigIBLock(This, OffsetToLock, SizeToLock, ppbData, Flags);
+    if (g_config.alternate_capture_mode) {
+        if (IDirect3DIndexBuffer9* shadow = GetShadow(This)) {
+            DWORD shadowFlags = Flags & ~(D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE);
+            return shadow->Lock(OffsetToLock, SizeToLock, ppbData, shadowFlags);
+        }
+    }
+    return pOrigIBLock(This, OffsetToLock, SizeToLock, ppbData, Flags);
+}
+
+static ULONG __stdcall Hooked_VBRelease(IDirect3DVertexBuffer9* This)
+{
+    IDirect3DVertexBuffer9* shadow = nullptr;
+    if (g_config.alternate_capture_mode)
+        shadow = GetShadow(This);
+    ULONG refs = pOrigVBRelease(This);
+    if (refs == 0 && shadow) shadow->Release();
+    return refs;
+}
+
+static ULONG __stdcall Hooked_IBRelease(IDirect3DIndexBuffer9* This)
+{
+    IDirect3DIndexBuffer9* shadow = nullptr;
+    if (g_config.alternate_capture_mode)
+        shadow = GetShadow(This);
+    ULONG refs = pOrigIBRelease(This);
+    if (refs == 0 && shadow) shadow->Release();
+    return refs;
+}
+
+static HRESULT __stdcall Hooked_IBUnlock(IDirect3DIndexBuffer9* This)
+{
+    if (g_vbHookBypass > 0)
+        return pOrigIBUnlock(This);
+    if (g_config.alternate_capture_mode) {
+        if (IDirect3DIndexBuffer9* shadow = GetShadow(This)) {
+            HRESULT hr = shadow->Unlock();
+            D3DINDEXBUFFER_DESC desc = {};
+            if (SUCCEEDED(This->GetDesc(&desc))) {
+                void* shadowPtr = nullptr;
+                void* realPtr   = nullptr;
+                if (SUCCEEDED(shadow->Lock(0, 0, &shadowPtr, D3DLOCK_READONLY)) && shadowPtr) {
+                    ++g_vbHookBypass;
+                    HRESULT lhr = This->Lock(0, 0, &realPtr, D3DLOCK_DISCARD);
+                    --g_vbHookBypass;
+                    if (SUCCEEDED(lhr) && realPtr) {
+                        memcpy(realPtr, shadowPtr, desc.Size);
+                        ++g_vbHookBypass;
+                        This->Unlock();
+                        --g_vbHookBypass;
+                    }
+                    shadow->Unlock();
+                }
+            }
+            return hr;
+        }
+    }
+    return pOrigIBUnlock(This);
+}
+
+// Attach a SYSTEMMEM shadow of `realResource` to it via raw-bytes
+// SetPrivateData. On success the stored raw pointer is the implicit
+// owner of the shadow's reference; the matching Release hook (e.g.
+// Hooked_TextureRelease) drops that reference when the game finally
+// destroys the real resource. On failure the shadow is released here.
+template <typename TResource>
+static bool AttachShadow(TResource* realResource, TResource* shadow)
+{
+    if (!realResource || !shadow) {
+        if (shadow) shadow->Release();
+        return false;
+    }
+    HRESULT spd = realResource->SetPrivateData(kShadowGuid, &shadow,
+                                                sizeof(TResource*),
+                                                0 /* raw bytes — no flags */);
+    if (FAILED(spd)) {
+        shadow->Release();
+        return false;
+    }
+    // shadow ref transferred implicitly to the stored pointer. The
+    // Release hook releases it when the real resource is destroyed.
+    return true;
+}
 
 static HRESULT __stdcall Hooked_CreateTexture(IDirect3DDevice9* This,
     UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format,
     D3DPOOL Pool, IDirect3DTexture9** ppTexture, HANDLE* pSharedHandle)
 {
-    if (g_config.alternate_capture_mode) {
-        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
-        int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
-        if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
+    const D3DPOOL originalPool = Pool;
+    if (g_config.alternate_capture_mode && Pool == D3DPOOL_MANAGED) {
+        // MANAGED → DEFAULT. We don't add DYNAMIC because the real
+        // texture is only ever written via UpdateTexture from the
+        // shadow in our UnlockRect hook — DYNAMIC's per-Lock buffer
+        // rotation is what caused HUD flicker before emulation.
+        Pool = D3DPOOL_DEFAULT;
     }
-    return pOrigCreateTexture(This, Width, Height, Levels, Usage, Format, Pool, ppTexture, pSharedHandle);
+    HRESULT hr = pOrigCreateTexture(This, Width, Height, Levels, Usage,
+                                    Format, Pool, ppTexture, pSharedHandle);
+
+    if (!SUCCEEDED(hr) || !ppTexture || !*ppTexture)
+        return hr;
+
+    // Lazy install of the Lock/UnlockRect/Release vtable hooks on the
+    // FIRST texture we ever see. One install covers all texture
+    // instances (D3D9 gives them a shared vtable).
+    if (g_config.alternate_capture_mode &&
+        InterlockedCompareExchange(&g_textureLockHooked, 1, 0) == 0)
+    {
+        SIZE_T hook_id = 0;
+        DWORD  lrErr   = g_nktInProc.Hook(&hook_id, (void**)&pOrigTextureLockRect,
+                                          lpvtbl_TextureLockRect(*ppTexture),
+                                          Hooked_TextureLockRect, 0);
+        DWORD  urErr   = g_nktInProc.Hook(&hook_id, (void**)&pOrigTextureUnlockRect,
+                                          lpvtbl_TextureUnlockRect(*ppTexture),
+                                          Hooked_TextureUnlockRect, 0);
+        DWORD  rErr    = g_nktInProc.Hook(&hook_id, (void**)&pOrigTextureRelease,
+                                          lpvtbl_TextureRelease(*ppTexture),
+                                          Hooked_TextureRelease, 0);
+        if (FAILED(lrErr) || FAILED(urErr) || FAILED(rErr)) {
+            KLOG(L"  Failed to hook IDirect3DTexture9 LockRect=0x%x UnlockRect=0x%x Release=0x%x\n",
+                 lrErr, urErr, rErr);
+            InterlockedExchange(&g_textureLockHooked, 0);
+        } else {
+            KLOG(L"  Hooked IDirect3DTexture9::Lock/Unlock/Release (managed emulation)\n");
+        }
+    }
+
+    // Pair MANAGED-rewritten textures with a SYSTEMMEM shadow of
+    // identical dims / format / mip levels. The shadow is the actual
+    // Lock destination; the real texture only ever sees UpdateTexture
+    // from our UnlockRect hook. ShadowOwner auto-releases the shadow
+    // when the game eventually Releases the real texture.
+    if (g_config.alternate_capture_mode && originalPool == D3DPOOL_MANAGED) {
+        IDirect3DTexture9* shadow = nullptr;
+        HRESULT shr = pOrigCreateTexture(This, Width, Height, Levels,
+                                          0 /*Usage*/, Format,
+                                          D3DPOOL_SYSTEMMEM, &shadow, nullptr);
+        if (FAILED(shr) || !shadow) {
+            KLOG(L"  managed emul: texture shadow CreateTexture failed hr=0x%x"
+                 L" (%ux%u L=%u fmt=%d)\n",
+                 shr, Width, Height, Levels, (int)Format);
+        } else if (!AttachShadow(*ppTexture, shadow)) {
+            KLOG(L"  managed emul: texture SetPrivateData failed\n");
+        }
+    }
+    return hr;
 }
 
+// Cube/Volume textures: rewrite MANAGED → DEFAULT + DYNAMIC. We don't
+// emulate MANAGED semantics for these (no shadow / no Lock-redirect
+// hooks) because we haven't seen a game depend on them yet. If a future
+// game does, extend in the same shape as Hooked_CreateTexture.
 static HRESULT __stdcall Hooked_CreateCubeTexture(IDirect3DDevice9* This,
     UINT EdgeLength, UINT Levels, DWORD Usage, D3DFORMAT Format,
     D3DPOOL Pool, IDirect3DCubeTexture9** ppCubeTexture, HANDLE* pSharedHandle)
 {
-    if (g_config.alternate_capture_mode) {
-        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+    if (g_config.alternate_capture_mode && Pool == D3DPOOL_MANAGED) {
+        Pool = D3DPOOL_DEFAULT;
         int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
         if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
     }
@@ -881,8 +1220,8 @@ static HRESULT __stdcall Hooked_CreateVolumeTexture(IDirect3DDevice9* This,
     UINT Width, UINT Height, UINT Depth, UINT Levels, DWORD Usage,
     D3DFORMAT Format, D3DPOOL Pool, IDirect3DVolumeTexture9** ppVolumeTexture, HANDLE* pSharedHandle)
 {
-    if (g_config.alternate_capture_mode) {
-        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+    if (g_config.alternate_capture_mode && Pool == D3DPOOL_MANAGED) {
+        Pool = D3DPOOL_DEFAULT;
         int renderOrStencil = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
         if (!renderOrStencil) Usage |= D3DUSAGE_DYNAMIC;
     }
@@ -901,22 +1240,113 @@ static HRESULT __stdcall Hooked_CreateVertexBuffer(IDirect3DDevice9* This,
     UINT Length, DWORD Usage, DWORD FVF, D3DPOOL Pool,
     IDirect3DVertexBuffer9** ppVertexBuffer, HANDLE* pSharedHandle)
 {
-    if (g_config.alternate_capture_mode) {
-        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+    const D3DPOOL originalPool = Pool;
+    if (g_config.alternate_capture_mode && Pool == D3DPOOL_MANAGED) {
+        // MANAGED → DEFAULT + DYNAMIC. The real VB needs DYNAMIC
+        // because our Unlock-equivalent for VBs is Lock(DISCARD) +
+        // memcpy + Unlock against the real, and DEFAULT pool can't
+        // be Locked without DYNAMIC.
+        //
+        // Critically, we DO NOT add DYNAMIC to non-MANAGED creates.
+        // Games often probe Usage and follow different code paths for
+        // DYNAMIC vs non-DYNAMIC; promoting silently broke geometry
+        // rendering in some games (Dead Space).
+        Pool = D3DPOOL_DEFAULT;
         Usage |= D3DUSAGE_DYNAMIC;
     }
-    return pOrigCreateVertexBuffer(This, Length, Usage, FVF, Pool, ppVertexBuffer, pSharedHandle);
+    HRESULT hr = pOrigCreateVertexBuffer(This, Length, Usage, FVF, Pool,
+                                          ppVertexBuffer, pSharedHandle);
+
+    if (!SUCCEEDED(hr) || !ppVertexBuffer || !*ppVertexBuffer)
+        return hr;
+
+    if (g_config.alternate_capture_mode &&
+        InterlockedCompareExchange(&g_vbLockHooked, 1, 0) == 0)
+    {
+        SIZE_T hook_id = 0;
+        DWORD  lE = g_nktInProc.Hook(&hook_id, (void**)&pOrigVBLock,
+                                      lpvtbl_VertexBufferLock(*ppVertexBuffer),
+                                      Hooked_VBLock, 0);
+        DWORD  uE = g_nktInProc.Hook(&hook_id, (void**)&pOrigVBUnlock,
+                                      lpvtbl_VertexBufferUnlock(*ppVertexBuffer),
+                                      Hooked_VBUnlock, 0);
+        DWORD  rE = g_nktInProc.Hook(&hook_id, (void**)&pOrigVBRelease,
+                                      lpvtbl_VertexBufferRelease(*ppVertexBuffer),
+                                      Hooked_VBRelease, 0);
+        if (FAILED(lE) || FAILED(uE) || FAILED(rE)) {
+            KLOG(L"  Failed to hook IDirect3DVertexBuffer9 Lock=0x%x Unlock=0x%x Release=0x%x\n",
+                 lE, uE, rE);
+            InterlockedExchange(&g_vbLockHooked, 0);
+        } else {
+            KLOG(L"  Hooked IDirect3DVertexBuffer9::Lock/Unlock/Release (managed emulation)\n");
+        }
+    }
+
+    if (g_config.alternate_capture_mode && originalPool == D3DPOOL_MANAGED) {
+        IDirect3DVertexBuffer9* shadow = nullptr;
+        HRESULT shr = pOrigCreateVertexBuffer(This, Length, 0 /*Usage*/,
+                                               FVF, D3DPOOL_SYSTEMMEM,
+                                               &shadow, nullptr);
+        if (FAILED(shr) || !shadow) {
+            KLOG(L"  managed emul: VB shadow CreateVertexBuffer failed hr=0x%x"
+                 L" (Length=%u FVF=0x%x)\n", shr, Length, FVF);
+        } else if (!AttachShadow(*ppVertexBuffer, shadow)) {
+            KLOG(L"  managed emul: VB SetPrivateData failed\n");
+        }
+    }
+    return hr;
 }
 
 static HRESULT __stdcall Hooked_CreateIndexBuffer(IDirect3DDevice9* This,
     UINT Length, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
     IDirect3DIndexBuffer9** ppIndexBuffer, HANDLE* pSharedHandle)
 {
-    if (g_config.alternate_capture_mode) {
-        if (Pool == D3DPOOL_MANAGED) Pool = D3DPOOL_DEFAULT;
+    const D3DPOOL originalPool = Pool;
+    if (g_config.alternate_capture_mode && Pool == D3DPOOL_MANAGED) {
+        Pool = D3DPOOL_DEFAULT;
         Usage |= D3DUSAGE_DYNAMIC;
     }
-    return pOrigCreateIndexBuffer(This, Length, Usage, Format, Pool, ppIndexBuffer, pSharedHandle);
+    HRESULT hr = pOrigCreateIndexBuffer(This, Length, Usage, Format, Pool,
+                                         ppIndexBuffer, pSharedHandle);
+
+    if (!SUCCEEDED(hr) || !ppIndexBuffer || !*ppIndexBuffer)
+        return hr;
+
+    if (g_config.alternate_capture_mode &&
+        InterlockedCompareExchange(&g_ibLockHooked, 1, 0) == 0)
+    {
+        SIZE_T hook_id = 0;
+        DWORD  lE = g_nktInProc.Hook(&hook_id, (void**)&pOrigIBLock,
+                                      lpvtbl_IndexBufferLock(*ppIndexBuffer),
+                                      Hooked_IBLock, 0);
+        DWORD  uE = g_nktInProc.Hook(&hook_id, (void**)&pOrigIBUnlock,
+                                      lpvtbl_IndexBufferUnlock(*ppIndexBuffer),
+                                      Hooked_IBUnlock, 0);
+        DWORD  rE = g_nktInProc.Hook(&hook_id, (void**)&pOrigIBRelease,
+                                      lpvtbl_IndexBufferRelease(*ppIndexBuffer),
+                                      Hooked_IBRelease, 0);
+        if (FAILED(lE) || FAILED(uE) || FAILED(rE)) {
+            KLOG(L"  Failed to hook IDirect3DIndexBuffer9 Lock=0x%x Unlock=0x%x Release=0x%x\n",
+                 lE, uE, rE);
+            InterlockedExchange(&g_ibLockHooked, 0);
+        } else {
+            KLOG(L"  Hooked IDirect3DIndexBuffer9::Lock/Unlock/Release (managed emulation)\n");
+        }
+    }
+
+    if (g_config.alternate_capture_mode && originalPool == D3DPOOL_MANAGED) {
+        IDirect3DIndexBuffer9* shadow = nullptr;
+        HRESULT shr = pOrigCreateIndexBuffer(This, Length, 0 /*Usage*/,
+                                              Format, D3DPOOL_SYSTEMMEM,
+                                              &shadow, nullptr);
+        if (FAILED(shr) || !shadow) {
+            KLOG(L"  managed emul: IB shadow CreateIndexBuffer failed hr=0x%x"
+                 L" (Length=%u fmt=%d)\n", shr, Length, (int)Format);
+        } else if (!AttachShadow(*ppIndexBuffer, shadow)) {
+            KLOG(L"  managed emul: IB SetPrivateData failed\n");
+        }
+    }
+    return hr;
 }
 
 
