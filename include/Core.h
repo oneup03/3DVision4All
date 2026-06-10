@@ -299,6 +299,18 @@ void Win32_HookDisplayModeApis();
 
 
 // --------------------------------------------------------------------------
+// Win32 display-mode CHANGE hooks — defined in Init.cpp. Neuter
+// ChangeDisplaySettings(Ex)(W/A) and SetDisplayConfig so games can't
+// switch the desktop into a different mode behind our back — the FSE
+// counterpart to force_windowed (which only covers the D3D9
+// PresentParameters path; ChangeDisplaySettings goes through Win32
+// directly and bypasses the D3D9 hook surface). Gated on
+// force_windowed; transparent pass-through when force_windowed=0.
+
+void Win32_HookChangeDisplaySettings();
+
+
+// --------------------------------------------------------------------------
 // D3D11 compose dispatch — defined in Compose_D3D11.cpp.
 // Runs on Device B (D3D11). Samples the staging SRV (opened cross-API from
 // the DX9Ex shared handle) and writes the mode-appropriate stereo composite
@@ -390,6 +402,7 @@ extern "C" LPVOID lpvtbl_EnumAdapterModes(IDirect3D9* pDX9);
 extern "C" LPVOID lpvtbl_GetAdapterModeCount(IDirect3D9* pDX9);
 extern "C" LPVOID lpvtbl_Present_DX9(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_Reset(IDirect3DDevice9* pDX9Device);
+extern "C" LPVOID lpvtbl_CreateAdditionalSwapChain(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateTexture(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateCubeTexture(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateVolumeTexture(IDirect3DDevice9* pDX9Device);

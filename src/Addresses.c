@@ -77,6 +77,13 @@ LPVOID lpvtbl_Reset(IDirect3DDevice9* pDX9Device)
     return pDX9Device->lpVtbl->Reset;
 }
 
+LPVOID lpvtbl_CreateAdditionalSwapChain(IDirect3DDevice9* pDX9Device)
+{
+    if (!pDX9Device)
+        return NULL;
+    return pDX9Device->lpVtbl->CreateAdditionalSwapChain;
+}
+
 LPVOID lpvtbl_CreateTexture(IDirect3DDevice9* pDX9Device)
 {
     if (!pDX9Device)

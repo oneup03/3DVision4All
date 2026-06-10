@@ -104,6 +104,9 @@ static HRESULT (__stdcall *pOrigPresent)(
 static HRESULT (__stdcall *pOrigReset)(
     IDirect3DDevice9*, D3DPRESENT_PARAMETERS*) = nullptr;
 
+static HRESULT (__stdcall *pOrigCreateAdditionalSwapChain)(
+    IDirect3DDevice9*, D3DPRESENT_PARAMETERS*, IDirect3DSwapChain9**) = nullptr;
+
 static HRESULT (__stdcall *pOrigCreateTexture)(
     IDirect3DDevice9*, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
     IDirect3DTexture9**, HANDLE*) = nullptr;
@@ -919,6 +922,23 @@ static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
 
 
 // --------------------------------------------------------------------------
+// Hooked CreateAdditionalSwapChain — separate vtable slot from Reset, so
+// games that open a second swap chain (multi-monitor splash, side
+// minimap, secondary render target window) bypass our Reset windowed-
+// override entirely. Apply the same overrides here. The first swap chain
+// (which the game keeps for its main render) is the one CreateDevice
+// builds and is already covered by Hooked_CreateDevice.
+
+static HRESULT __stdcall Hooked_CreateAdditionalSwapChain(IDirect3DDevice9* This,
+    D3DPRESENT_PARAMETERS* pPresentationParameters,
+    IDirect3DSwapChain9** ppSwapChain)
+{
+    ApplyPresentParamOverrides(pPresentationParameters);
+    return pOrigCreateAdditionalSwapChain(This, pPresentationParameters, ppSwapChain);
+}
+
+
+// --------------------------------------------------------------------------
 // DX9Ex compat hooks. Hooked_Direct3DCreate9 silently upgrades the game's
 // IDirect3D9 to Ex when alternate_capture_mode=1 (the default — needed
 // for the shared-handle handoff and for NvAPI on older driver builds).
@@ -1507,6 +1527,11 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
         dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigReset,
                                    lpvtbl_Reset(pDevice9), Hooked_Reset, 0);
         if (FAILED(dwOsErr)) KLOG(L"Failed to hook Reset 0x%x\n", dwOsErr);
+
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateAdditionalSwapChain,
+                                   lpvtbl_CreateAdditionalSwapChain(pDevice9),
+                                   Hooked_CreateAdditionalSwapChain, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateAdditionalSwapChain 0x%x\n", dwOsErr);
 
         dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateTexture,
                                    lpvtbl_CreateTexture(pDevice9), Hooked_CreateTexture, 0);

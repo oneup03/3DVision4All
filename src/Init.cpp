@@ -133,6 +133,7 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
     DX9_InstallHooks();
     NvApi_HookSetDriverMode();
     Win32_HookDisplayModeApis();
+    Win32_HookChangeDisplaySettings();
 
     KLOG(L"3DVision4All init thread complete\n");
     return 0;
@@ -274,6 +275,146 @@ void Win32_HookDisplayModeApis()
                                    pGDC, Hooked_GetDeviceCaps, 0);
         if (FAILED(dwOsErr)) KLOG(L"Win32_HookDisplayModeApis: GetDeviceCaps hook failed 0x%x\n", dwOsErr);
         else                 KLOG(L"Win32_HookDisplayModeApis: hooked GetDeviceCaps @ %p\n", pGDC);
+    }
+}
+
+
+// --------------------------------------------------------------------------
+// Win32 display-mode CHANGE hooks — the FSE counterpart to the D3D9
+// force_windowed path. Older engines (pre-DXGI, Metro 2033-era) drive
+// the desktop into a "device mode" via ChangeDisplaySettings(Ex) directly,
+// completely bypassing the D3D9 PresentationParameters Windowed flag.
+// The D3D9 swap chain then runs nominally windowed inside a desktop
+// that's been modeswitched out from under us — visually identical to
+// FSE, and on modern Windows it can wedge the panel into Direct-Flip
+// with a resolution mismatch.
+//
+// When force_windowed=1 we neuter all four entry points (ANSI + wide,
+// non-Ex + Ex, plus the modern SetDisplayConfig) by returning success
+// without forwarding. With force_windowed=0 the hooks are still
+// installed but become transparent pass-throughs.
+
+typedef LONG (WINAPI *t_ChangeDisplaySettingsExW)(LPCWSTR, DEVMODEW*, HWND, DWORD, LPVOID);
+typedef LONG (WINAPI *t_ChangeDisplaySettingsExA)(LPCSTR,  DEVMODEA*, HWND, DWORD, LPVOID);
+typedef LONG (WINAPI *t_ChangeDisplaySettingsW) (DEVMODEW*, DWORD);
+typedef LONG (WINAPI *t_ChangeDisplaySettingsA) (DEVMODEA*, DWORD);
+typedef LONG (WINAPI *t_SetDisplayConfig)       (UINT32, void*, UINT32, void*, UINT32);
+
+static t_ChangeDisplaySettingsExW pOrigChangeDisplaySettingsExW = nullptr;
+static t_ChangeDisplaySettingsExA pOrigChangeDisplaySettingsExA = nullptr;
+static t_ChangeDisplaySettingsW   pOrigChangeDisplaySettingsW   = nullptr;
+static t_ChangeDisplaySettingsA   pOrigChangeDisplaySettingsA   = nullptr;
+static t_SetDisplayConfig         pOrigSetDisplayConfig         = nullptr;
+
+
+static LONG WINAPI Hooked_ChangeDisplaySettingsExW(LPCWSTR lpszDeviceName,
+                                                    DEVMODEW* lpDevMode,
+                                                    HWND hwnd, DWORD dwFlags,
+                                                    LPVOID lParam)
+{
+    if (g_config.force_windowed) {
+        KLOG_V(L"Hooked_ChangeDisplaySettingsExW: neutered (flags=0x%x devmode=%p)\n",
+               dwFlags, lpDevMode);
+        return DISP_CHANGE_SUCCESSFUL;
+    }
+    return pOrigChangeDisplaySettingsExW(lpszDeviceName, lpDevMode, hwnd, dwFlags, lParam);
+}
+
+static LONG WINAPI Hooked_ChangeDisplaySettingsExA(LPCSTR lpszDeviceName,
+                                                    DEVMODEA* lpDevMode,
+                                                    HWND hwnd, DWORD dwFlags,
+                                                    LPVOID lParam)
+{
+    if (g_config.force_windowed) {
+        KLOG_V(L"Hooked_ChangeDisplaySettingsExA: neutered (flags=0x%x devmode=%p)\n",
+               dwFlags, lpDevMode);
+        return DISP_CHANGE_SUCCESSFUL;
+    }
+    return pOrigChangeDisplaySettingsExA(lpszDeviceName, lpDevMode, hwnd, dwFlags, lParam);
+}
+
+static LONG WINAPI Hooked_ChangeDisplaySettingsW(DEVMODEW* lpDevMode, DWORD dwFlags)
+{
+    if (g_config.force_windowed) {
+        KLOG_V(L"Hooked_ChangeDisplaySettingsW: neutered (flags=0x%x devmode=%p)\n",
+               dwFlags, lpDevMode);
+        return DISP_CHANGE_SUCCESSFUL;
+    }
+    return pOrigChangeDisplaySettingsW(lpDevMode, dwFlags);
+}
+
+static LONG WINAPI Hooked_ChangeDisplaySettingsA(DEVMODEA* lpDevMode, DWORD dwFlags)
+{
+    if (g_config.force_windowed) {
+        KLOG_V(L"Hooked_ChangeDisplaySettingsA: neutered (flags=0x%x devmode=%p)\n",
+               dwFlags, lpDevMode);
+        return DISP_CHANGE_SUCCESSFUL;
+    }
+    return pOrigChangeDisplaySettingsA(lpDevMode, dwFlags);
+}
+
+static LONG WINAPI Hooked_SetDisplayConfig(UINT32 numPathArrayElements,
+                                            void* pathArray,
+                                            UINT32 numModeInfoArrayElements,
+                                            void* modeInfoArray,
+                                            UINT32 flags)
+{
+    if (g_config.force_windowed) {
+        KLOG_V(L"Hooked_SetDisplayConfig: neutered (flags=0x%x)\n", flags);
+        return ERROR_SUCCESS;
+    }
+    return pOrigSetDisplayConfig(numPathArrayElements, pathArray,
+                                 numModeInfoArrayElements, modeInfoArray, flags);
+}
+
+
+void Win32_HookChangeDisplaySettings()
+{
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (!hUser32) hUser32 = LoadLibraryW(L"user32.dll");
+    if (!hUser32) {
+        KLOG(L"Win32_HookChangeDisplaySettings: user32.dll not loaded\n");
+        return;
+    }
+
+    FARPROC pCDSExW = GetProcAddress(hUser32, "ChangeDisplaySettingsExW");
+    FARPROC pCDSExA = GetProcAddress(hUser32, "ChangeDisplaySettingsExA");
+    FARPROC pCDSW   = GetProcAddress(hUser32, "ChangeDisplaySettingsW");
+    FARPROC pCDSA   = GetProcAddress(hUser32, "ChangeDisplaySettingsA");
+    FARPROC pSDC    = GetProcAddress(hUser32, "SetDisplayConfig");
+
+    SIZE_T hook_id = 0;
+    DWORD dwOsErr;
+
+    if (pCDSExW && !pOrigChangeDisplaySettingsExW) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigChangeDisplaySettingsExW,
+                                   pCDSExW, Hooked_ChangeDisplaySettingsExW, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookChangeDisplaySettings: ChangeDisplaySettingsExW hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookChangeDisplaySettings: hooked ChangeDisplaySettingsExW @ %p\n", pCDSExW);
+    }
+    if (pCDSExA && !pOrigChangeDisplaySettingsExA) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigChangeDisplaySettingsExA,
+                                   pCDSExA, Hooked_ChangeDisplaySettingsExA, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookChangeDisplaySettings: ChangeDisplaySettingsExA hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookChangeDisplaySettings: hooked ChangeDisplaySettingsExA @ %p\n", pCDSExA);
+    }
+    if (pCDSW && !pOrigChangeDisplaySettingsW) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigChangeDisplaySettingsW,
+                                   pCDSW, Hooked_ChangeDisplaySettingsW, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookChangeDisplaySettings: ChangeDisplaySettingsW hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookChangeDisplaySettings: hooked ChangeDisplaySettingsW @ %p\n", pCDSW);
+    }
+    if (pCDSA && !pOrigChangeDisplaySettingsA) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigChangeDisplaySettingsA,
+                                   pCDSA, Hooked_ChangeDisplaySettingsA, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookChangeDisplaySettings: ChangeDisplaySettingsA hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookChangeDisplaySettings: hooked ChangeDisplaySettingsA @ %p\n", pCDSA);
+    }
+    if (pSDC && !pOrigSetDisplayConfig) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigSetDisplayConfig,
+                                   pSDC, Hooked_SetDisplayConfig, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Win32_HookChangeDisplaySettings: SetDisplayConfig hook failed 0x%x\n", dwOsErr);
+        else                 KLOG(L"Win32_HookChangeDisplaySettings: hooked SetDisplayConfig @ %p\n", pSDC);
     }
 }
 
