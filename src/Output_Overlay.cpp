@@ -480,6 +480,9 @@ static void ReleaseDeviceB()
 {
     // SR weaver holds D3D11 pointers — tear it down first.
     LeiaSR_Shutdown();
+    // Katanga IPC also publishes a Device-B-owned texture; release it
+    // before we drop the device so the consumer sees the handle clear.
+    Katanga_Shutdown();
     Compose_D3D11_Release();
     if (s_leiaSrcRTV) { s_leiaSrcRTV->Release(); s_leiaSrcRTV = nullptr; }
     if (s_leiaSrcSRV) { s_leiaSrcSRV->Release(); s_leiaSrcSRV = nullptr; }
@@ -616,8 +619,23 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
             }
         }
         if (!didWeave) {
+            // Katanga mode renders an SbS preview into the overlay BB
+            // so the user can confirm capture is alive even before the
+            // VR consumer attaches. The Compose pass is mode-agnostic
+            // for any value that has no dedicated shader (the
+            // HlslForMode default returns Sbs), so passing Katanga
+            // here is fine. The actual cross-process hand-off happens
+            // immediately after the compose.
+            StereoMode composeMode = (g_config.mode == StereoMode::Katanga)
+                                         ? StereoMode::Sbs
+                                         : g_config.mode;
             Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_backBufRTV,
-                              s_bbWidth, s_bbHeight, g_config.mode);
+                              s_bbWidth, s_bbHeight, composeMode);
+
+            if (g_config.mode == StereoMode::Katanga) {
+                Katanga_PublishFrame(s_deviceB, s_contextB, s_sharedTex,
+                                     g_stagingWidth, g_stagingHeight);
+            }
         }
 
         HRESULT pr = s_swapChain->Present(1, 0);

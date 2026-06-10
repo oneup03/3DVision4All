@@ -80,6 +80,7 @@
     <ClCompile Include="Hooks_DX9.cpp" />
     <ClCompile Include="Init.cpp" />
     <ClCompile Include="Log.cpp" />
+    <ClCompile Include="Output_Katanga.cpp" />
     <ClCompile Include="Output_LeiaSR.cpp" />
     <ClCompile Include="Output_Overlay.cpp" />
   </ItemGroup>

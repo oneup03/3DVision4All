@@ -56,6 +56,7 @@ static StereoMode ParseMode(const wchar_t* s)
     if (_wcsicmp(s, L"column_interlaced") == 0) return StereoMode::ColumnInterlaced;
     if (_wcsicmp(s, L"checkerboard")      == 0) return StereoMode::Checkerboard;
     if (_wcsicmp(s, L"leiasr")            == 0) return StereoMode::LeiaSR;
+    if (_wcsicmp(s, L"katanga")           == 0) return StereoMode::Katanga;
     return StereoMode::Sbs;
 }
 

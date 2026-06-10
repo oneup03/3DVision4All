@@ -48,6 +48,7 @@
 // Output_LeiaSR.cpp), which include d3d11.h directly.
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
 struct ID3D11RenderTargetView;
 
@@ -67,6 +68,14 @@ enum class StereoMode {
     ColumnInterlaced,   // W × H output; even cols = L, odd cols = R
     Checkerboard,       // W × H output; (x+y) odd/even = L/R
     LeiaSR,             // SR weaver to a Leia / Simulated Reality display
+    Katanga,            // Publish a full-SbS DX11 shared texture (R-on-left
+                        // half, L-on-right half) over the Katanga IPC
+                        // protocol so a separate VR viewer (Katanga.exe,
+                        // VRScreenCap) can pick it up and display it in HMD.
+                        // The overlay window still shows a regular SbS
+                        // preview so the user can confirm capture is alive
+                        // even without a VR consumer attached. See
+                        // Output_Katanga.cpp for the protocol details.
 };
 
 struct Config {
@@ -315,6 +324,24 @@ bool LeiaSR_TryInit(ID3D11Device*             device,
 void LeiaSR_Weave();
 bool LeiaSR_IsActive();
 void LeiaSR_Shutdown();
+
+
+// --------------------------------------------------------------------------
+// Katanga IPC publish — defined in Output_Katanga.cpp.
+//
+// Hands the captured full-SbS frame off to a separate VR viewer process
+// (Katanga.exe, VRScreenCap) over the Katanga shared-texture protocol:
+// named MMF "Local\KatangaMappedFile" carries a 32-bit DXGI shared handle,
+// and named mutex "KatangaSetupMutex" gates the recreate window. Called
+// from the overlay present thread once per frame when the mode is
+// StereoMode::Katanga. No-op (with periodic re-open attempts) until a VR
+// consumer is detected.
+void Katanga_PublishFrame(ID3D11Device*        device,
+                          ID3D11DeviceContext* ctx,
+                          ID3D11Texture2D*     stagingTex,
+                          UINT                 stagingWidth,
+                          UINT                 stagingHeight);
+void Katanga_Shutdown();
 
 
 // --------------------------------------------------------------------------
