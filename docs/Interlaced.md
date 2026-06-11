@@ -3,7 +3,24 @@ Compatible with devices like:
 - LG/Sony 4k OLED/LCD 3D TVs
 - LG/Acer/Zalman 3D Monitors
 
+For real interlaced displays the EDID ID Override path below outputs native 3DVision interlaced frames directly from the Nvidia driver. If you'd rather skip the EDID setup and let the injector compose the interlaced pattern from regular stereo frames, see the Injector method at the bottom.
+
 {% include 3DFM.md %}
+
+## EDID ID Override
+- Only the `Device ID` has to be changed to enable 3DVision, but it will be limited to the resolutions/colors of the original EDID
+- This only changes the EDID ID on your current PC
+- Download <a href="https://www.monitortests.com/forum/Thread-Custom-Resolution-Utility-CRU" target="_blank" rel="noopener noreferrer">CRU</a> and extract it to a folder
+- Run `CRU.exe` as admin
+- Select your device from the drop down menu and select `Edit`
+- Set the Device ID to `ACR02B9` and click `OK`
+- <img width="530" height="407" alt="image" src="https://github.com/user-attachments/assets/05398633-8dc2-4447-b22a-eec0e642b263" />
+- Click `OK` to close CRU
+- Run `restart64.exe` as admin and your Nvidia driver will restart
+- `Exit` the Restart app
+
+<details markdown="1">
+  <summary markdown="span">Show Windows Monitor Driver EDID Override (alternative)</summary>
 
 ## Windows Monitor Driver EDID Override
 - This overrides the display EDID at the Windows driver level. It's a bit more complicated, but might be preferred for real interlaced displays
@@ -20,6 +37,8 @@ Compatible with devices like:
   
     <img width="260" height="155" alt="image" src="https://github.com/user-attachments/assets/e0cb5c8b-c5c3-407e-a0d4-92e70c2323c9" />
 - Interlaced display hardware requires you to output games at the display native resolutions (4k or 1080p)
+
+</details>
 
 ## Windows & Nvidia Settings
 - In Windows Display Settings, choose your device and then choose `Make this my main display` for 3DVision to work
@@ -128,6 +147,24 @@ _Required to select **4:4:4** in NVIDIA settings_
     - Unfortunately 3D Fix Manager resets this lock, so you have to close it for this method
 - Launch the game manually and it should start on your device in interlaced 3D
 - Configure the game resolution to match your native resolution, otherwise you won't get 3D
+
+
+<details markdown="1">
+  <summary markdown="span">Show Injector method (alternative)</summary>
+
+The injector composes a row- or column-interlaced image from regular stereo frames, so it works at any source resolution and doesn't require the EDID override above. Use this if the native-3DVision path isn't working for your display or you want to render the game below the panel's native resolution.
+
+{% include Injector.md %}
+
+## Configuration
+- In `3dvision4all.ini`, set `mode = row_interlaced` (most passive 3D displays — LG OLED, LG/Sony 4k TVs) or `mode = column_interlaced` (rare passive setups)
+- If the 3D image looks doubled or eye-swapped, try `swap_eyes = 1` first, and only switch row/column if that doesn't help
+- Make sure your interlaced display is set as the primary display in Windows so the injector overlay shows on it
+- The injector outputs at the display's native resolution regardless of the game's render resolution
+
+{% include InjectorPlay.md %}
+
+</details>
 
 
 {% include Notes.md %}
