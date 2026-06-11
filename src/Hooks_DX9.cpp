@@ -862,16 +862,17 @@ static HRESULT __stdcall Hooked_CreateAdditionalSwapChain(IDirect3DDevice9* This
 
 // --------------------------------------------------------------------------
 // DX9Ex compat hooks. Hooked_Direct3DCreate9 silently upgrades the game's
-// IDirect3D9 to Ex when alternate_capture_mode=1 (the default — needed
-// for the shared-handle handoff and for NvAPI on older driver builds).
-// Ex rejects D3DPOOL_MANAGED, so we rewrite MANAGED → DEFAULT for every
+// IDirect3D9 to Ex when alternate_capture_mode=1 (needed for the
+// shared-handle handoff and for NvAPI on older driver builds). Ex
+// rejects D3DPOOL_MANAGED, so we rewrite MANAGED → DEFAULT for every
 // game-side resource creation AND add D3DUSAGE_DYNAMIC to non-RT/non-DS
 // resources so the resulting DEFAULT-pool resource remains CPU-Lockable
 // (games originally choosing MANAGED typically Lock during init and
 // sometimes again to refresh).
 //
-// When alternate_capture_mode=0 the game's device stays non-Ex, MANAGED
-// is legal, and the entire rewrite is a pure pass-through.
+// When alternate_capture_mode=0 (the default) the game's device stays
+// non-Ex, MANAGED is legal, and the entire rewrite is a pure
+// pass-through.
 
 static HRESULT __stdcall Hooked_CreateTexture(IDirect3DDevice9* This,
     UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format,
@@ -1187,9 +1188,9 @@ void DX9_InstallVtableHooksOn(IDirect3D9* pDX9)
 
 
 // --------------------------------------------------------------------------
-// Hooked Direct3DCreate9. With alternate_capture_mode=1 (default) we
-// quietly upgrade the game's IDirect3D9 to IDirect3D9Ex (castable to
-// plain IDirect3D9 from the game's perspective). Two reasons:
+// Hooked Direct3DCreate9. With alternate_capture_mode=1 we quietly
+// upgrade the game's IDirect3D9 to IDirect3D9Ex (castable to plain
+// IDirect3D9 from the game's perspective). Two reasons:
 //   1. CreateTexture with pSharedHandle != NULL — the cross-API handoff
 //      to Device B — is a D3D9Ex-only feature; non-Ex devices return
 //      D3DERR_INVALIDCALL when you ask for a shared resource.
@@ -1199,9 +1200,9 @@ void DX9_InstallVtableHooksOn(IDirect3D9* pDX9)
 // below rewrite MANAGED → DEFAULT (+ DYNAMIC on non-RT/non-DS) to keep
 // games that think they're on plain DX9 working.
 //
-// With alternate_capture_mode=0, we hand back the plain non-Ex device
-// untouched. The shared-handle path becomes unavailable, so
-// EnsureStereoStage falls through to the CPU-readback handoff (see
+// With alternate_capture_mode=0 (the default), we hand back the plain
+// non-Ex device untouched. The shared-handle path becomes unavailable,
+// so EnsureStereoStage falls through to the CPU-readback handoff (see
 // Hooks_DX9.cpp:: g_sysmemSurface / g_stagingCpuBuffer).
 
 static IDirect3D9* __stdcall Hooked_Direct3DCreate9(UINT SDKVersion)

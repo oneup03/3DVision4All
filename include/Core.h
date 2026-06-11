@@ -147,22 +147,24 @@ struct Config {
     // handoff paths from Device A (D3D9 capture) to Device B (D3D11
     // overlay):
     //
-    // alternate_capture_mode = 1 (default): the D3D9 device is silently
-    // upgraded to IDirect3D9Ex, NvAPI's reverse-stereo-blit lands in an
-    // Ex shared-handle render target, and Device B opens that texture
-    // directly via OpenSharedResource. Fastest path; zero CPU readback.
-    // Side effect: Ex rejects D3DPOOL_MANAGED, so the hooked Create*
-    // methods rewrite MANAGED → DEFAULT and add D3DUSAGE_DYNAMIC. Most
-    // games tolerate this fine.
+    // alternate_capture_mode = 0 (default): the device stays plain
+    // (non-Ex), the pool rewrite is skipped, and the staging is copied
+    // each frame via GetRenderTargetData → SYSTEMMEM → CPU buffer →
+    // D3D11 dynamic texture Map/Unmap. Widest compatibility. Costs one
+    // extra GPU→CPU + CPU→GPU round-trip per frame; usually invisible
+    // at <= 1080p, measurable at 4K but still functional (use
+    // copy_width/copy_height to cap readback size).
     //
-    // alternate_capture_mode = 0: the device stays plain (non-Ex), the
-    // pool rewrite is skipped, and the staging is copied each frame via
-    // GetRenderTargetData → SYSTEMMEM → CPU buffer → D3D11 dynamic
-    // texture Map/Unmap. Required for games whose own pipeline crashes
-    // under the Ex upgrade or the MANAGED rewrite. Costs one extra
-    // GPU→CPU + CPU→GPU round-trip per frame; usually invisible at
-    // <= 1080p, measurable at 4K but still functional.
-    int        alternate_capture_mode = 1;
+    // alternate_capture_mode = 1: the D3D9 device is silently upgraded
+    // to IDirect3D9Ex, NvAPI's reverse-stereo-blit lands in an Ex
+    // shared-handle render target, and Device B opens that texture
+    // directly via OpenSharedResource. Fastest path; zero CPU readback;
+    // supports higher resolutions cleanly. Side effect: Ex rejects
+    // D3DPOOL_MANAGED, so the hooked Create* methods rewrite MANAGED →
+    // DEFAULT and add D3DUSAGE_DYNAMIC. Some games show graphical
+    // glitches (flicker, missing/black textures, geometry distortion)
+    // or crash outright under this path.
+    int        alternate_capture_mode = 0;
 
     // Diagnostic knobs — three points where we can cut off our hook
     // surface to bisect a crash. All default 1 (full hook coverage).
