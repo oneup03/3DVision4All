@@ -151,15 +151,9 @@ struct Config {
     // upgraded to IDirect3D9Ex, NvAPI's reverse-stereo-blit lands in an
     // Ex shared-handle render target, and Device B opens that texture
     // directly via OpenSharedResource. Fastest path; zero CPU readback.
-    //
     // Side effect: Ex rejects D3DPOOL_MANAGED, so the hooked Create*
-    // methods rewrite MANAGED → DEFAULT. For textures / VBs / IBs we
-    // also pair the rewritten resource with a SYSTEMMEM "shadow" of
-    // the same dims and redirect Lock/Unlock so the game gets MANAGED's
-    // Lockable + content-preserved semantics — without that emulation
-    // the rewrite to DEFAULT+DYNAMIC visibly breaks games that do
-    // non-DISCARD Locks (UE3 especially: HUD elements flicker).
-    // See Hooks_DX9.cpp for the emulation details.
+    // methods rewrite MANAGED → DEFAULT and add D3DUSAGE_DYNAMIC. Most
+    // games tolerate this fine.
     //
     // alternate_capture_mode = 0: the device stays plain (non-Ex), the
     // pool rewrite is skipped, and the staging is copied each frame via
@@ -409,12 +403,3 @@ extern "C" LPVOID lpvtbl_CreateVolumeTexture(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateOffscreenPlainSurface(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateVertexBuffer(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateIndexBuffer(IDirect3DDevice9* pDX9Device);
-extern "C" LPVOID lpvtbl_TextureLockRect(IDirect3DTexture9* pTexture);
-extern "C" LPVOID lpvtbl_TextureUnlockRect(IDirect3DTexture9* pTexture);
-extern "C" LPVOID lpvtbl_VertexBufferLock(IDirect3DVertexBuffer9* pVB);
-extern "C" LPVOID lpvtbl_VertexBufferUnlock(IDirect3DVertexBuffer9* pVB);
-extern "C" LPVOID lpvtbl_IndexBufferLock(IDirect3DIndexBuffer9* pIB);
-extern "C" LPVOID lpvtbl_IndexBufferUnlock(IDirect3DIndexBuffer9* pIB);
-extern "C" LPVOID lpvtbl_TextureRelease(IDirect3DTexture9* pTexture);
-extern "C" LPVOID lpvtbl_VertexBufferRelease(IDirect3DVertexBuffer9* pVB);
-extern "C" LPVOID lpvtbl_IndexBufferRelease(IDirect3DIndexBuffer9* pIB);
