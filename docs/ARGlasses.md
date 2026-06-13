@@ -5,6 +5,8 @@ Compatible with devices like:
 - RayNeo
 - Rokid
 
+{% include 3DFM.md %}
+
 {% include Injector.md %}
 
 ## Configuration

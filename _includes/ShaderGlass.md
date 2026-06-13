@@ -56,9 +56,6 @@
 - Follow the [Interlaced Windows Driver](https://oneup03.github.io/3DVision4All/docs/Interlaced#windows-monitor-driver-edid-override) instructions
 
 
-{% include 3DFM.md %}
-
-
 ## Windows & Nvidia Settings
 - In Windows Display Settings, choose your device and then choose `Make this my main display` for 3DVision to work
 - Set its resolution to `3840x2160`

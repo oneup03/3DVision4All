@@ -2,6 +2,8 @@
 - Compatible with any SbS or TaB device
 - TaB will give you the maximum resolution when converting from interlaced if your display supports it
 
+{% include 3DFM.md %}
+
 {% include Injector.md %}
 
 ## Configuration

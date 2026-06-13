@@ -138,8 +138,8 @@ _Required to select **4:4:4** in NVIDIA settings_
 - Ensure your device is set as your primary display, 3840x2160 or 1920x1080 resolution, and 3D Vision is enabled as `Acer Passive 3D LCD`
 - Install fixes either manually from <a href="https://helixmod.blogspot.com/2013/10/game-list-automatically-updated.html" target="_blank" rel="noopener noreferrer">Helixmod</a> or using 3D Fix Manager
 - If eyes need to be swapped, you have two options:
-  - 1. Download the <a href="https://github.com/Bizonu/3dvision-eye-swapper" target="_blank" rel="noopener noreferrer">Eye Swapper</a> tool, extract it, browse into the `3dvision-eye-swapper-master\bin\x64\Release\` folder and run `3DVisionEyeSwapper.exe` as ADMIN and keep it running in the background
-  - 2. Advanced 3DVision Config
+  - Download the <a href="https://github.com/Bizonu/3dvision-eye-swapper" target="_blank" rel="noopener noreferrer">Eye Swapper</a> tool, extract it, browse into the `3dvision-eye-swapper-master\bin\x64\Release\` folder and run `3DVisionEyeSwapper.exe` as ADMIN and keep it running in the background
+  - Advanced 3DVision Config
     - Close 3D Fix Manager completely from taskbar
     - <img width="231" height="127" alt="image" src="https://github.com/user-attachments/assets/14a4869b-355d-4f06-ace8-a273a83c8222" />
     - Use <a href="https://helixmod.blogspot.com/2015/10/advanced-3d-vision-configuration.html" target="_blank" rel="noopener noreferrer">Advanced 3DVision Configuration</a> (run as admin) to set `Swap Interleave Pattern` and `Lock Registry Key` and click `Save Settings`

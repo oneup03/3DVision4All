@@ -1,6 +1,3 @@
-{% include 3DFM.md %}
-
-
 ## Nvidia Control Panel
 - Open Nvidia Control Panel
 - Select `Set up stereoscopic 3D`
@@ -20,7 +17,7 @@
 
 
 ## 3DVision4All Injector Installation
-- The injector is a proxy DLL dropped next to the game's executable. It hooks DirectX 9 and NvAPI Stereo to capture each eye and composes the stereo output for your display — no separate Shader Glass window required, no display EDID override required
+- The injector is a proxy DLL dropped next to the game's executable. It hooks DirectX 9 and NvAPI Stereo to capture each eye and composes the stereo output for your display — no separate Shader Glass window required, no display EDID override required, no extra hardware (EDID emulator, dummy plug, capture card, secondary display) required
 - **DirectX 9 / DX9Ex only.** The injector does not work with DX10, DX11, or DX12 games. For DX10–12 titles use one of the legacy methods (Shader Glass for non-native displays, native 3DVision via the Old Driver path on RTX 20-series or older) instead
 - Download the latest [3DVision4All injector](https://github.com/oneup03/3DVision4All/releases/latest) zip and extract it
   - For 32-bit games (most older DX9 games), use the files in `Win32-Release`

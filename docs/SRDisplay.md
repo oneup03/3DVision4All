@@ -6,6 +6,8 @@ Compatible with devices like:
 ## SR Runtime Installation
 - Install the software package provided with your SR display (Samsung Odyssey 3D Hub or Acer TrueGame) — this installs the LeiaSR / Simulated Reality runtime that the injector hands frames off to
 
+{% include 3DFM.md %}
+
 {% include Injector.md %}
 
 ## Configuration

@@ -1,6 +1,8 @@
 # VR HMDs with Virtual 3D Screens
 VR HMDs have a few options to play 3DVision games on a virtual screen. The recommended path is the injector publishing to a VRScreenCap or Katanga viewer over IPC.
 
+{% include 3DFM.md %}
+
 {% include Injector.md %}
 
 ## Configuration
