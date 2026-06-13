@@ -183,17 +183,6 @@ struct Config {
     int        install_d3d9_vtable_hooks       = 1;
     int        install_d3d9_display_mode_hooks = 1;
 
-    // When 1 (default), OR D3DCREATE_MULTITHREADED into the game's
-    // CreateDevice flags. We don't call D3D9 from any thread except the
-    // game's Present thread, so this is defensive — included so that
-    // games whose own renderer is multithreaded still serialize through
-    // the runtime mutex correctly. A few games have internal thread bugs
-    // (Inversion is the known case — PCGamingWiki recommends single-core
-    // affinity as a workaround) where the added serialization tanks
-    // framerate to single digits. Set to 0 on those games to skip the
-    // flag and let the game's own CreateDevice flags pass through.
-    int        force_multithreaded_device      = 1;
-
     // Per-eye downsample resolution for the cross-API staging texture.
     // The staging is normally 2 × BB_width by BB_height — at 4K BB that's
     // 7680x2160, ~66 MB. The CPU-readback path's GetRenderTargetData has

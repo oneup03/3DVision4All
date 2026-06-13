@@ -93,7 +93,6 @@ void Config_Load(Config& cfg)
     cfg.install_device_hooks            = GetPrivateProfileIntW(L"debug", L"install_device_hooks",            1, iniPath);
     cfg.install_d3d9_vtable_hooks       = GetPrivateProfileIntW(L"debug", L"install_d3d9_vtable_hooks",       1, iniPath);
     cfg.install_d3d9_display_mode_hooks = GetPrivateProfileIntW(L"debug", L"install_d3d9_display_mode_hooks", 1, iniPath);
-    cfg.force_multithreaded_device      = GetPrivateProfileIntW(L"debug", L"force_multithreaded_device",      1, iniPath);
 
     wchar_t logRel[MAX_PATH] = L"";
     GetPrivateProfileStringW(L"debug", L"log_file", L"3dvision4all.log",

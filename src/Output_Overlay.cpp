@@ -325,7 +325,17 @@ static bool EnsureStagingOnB()
         HRESULT hr = s_deviceB->OpenSharedResource(pub, __uuidof(ID3D11Texture2D),
                                                    (void**)&s_sharedTex);
         if (FAILED(hr) || !s_sharedTex) {
-            KLOG(L"Output_Overlay: OpenSharedResource failed hr=0x%x handle=%p\n", hr, pub);
+            // Log once per distinct (handle, hr) — the producer republishes
+            // the same handle every frame until Reset, so without dedup the
+            // overlay present thread hammers the log with the same line at
+            // refresh-rate.
+            static HANDLE  s_lastFailHandle = nullptr;
+            static HRESULT s_lastFailHr     = S_OK;
+            if (pub != s_lastFailHandle || hr != s_lastFailHr) {
+                KLOG(L"Output_Overlay: OpenSharedResource failed hr=0x%x handle=%p\n", hr, pub);
+                s_lastFailHandle = pub;
+                s_lastFailHr     = hr;
+            }
             s_sharedTex = nullptr;
             return false;
         }

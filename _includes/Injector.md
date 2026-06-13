@@ -60,4 +60,3 @@
 - `log_file` — log path (relative to the game's EXE if not absolute). Cleared each run
 - `log_level` — `0` off, `1` info (default), `2` verbose
 - `install_device_hooks`, `install_d3d9_vtable_hooks`, `install_d3d9_display_mode_hooks` — all default `1`. Diagnostic bisect switches for crashes; leave alone unless you're tracking down a regression
-- `force_multithreaded_device` (default `1`) — OR `D3DCREATE_MULTITHREADED` into the game's `CreateDevice` flags. Defensive (we never call D3D9 off the game's Present thread). A few games (Inversion is the known case) have internal threading bugs the added serialization makes much worse — single-digit FPS. Set to `0` on those games; safe to leave at `1` everywhere else

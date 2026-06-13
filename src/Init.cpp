@@ -119,7 +119,6 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
     KLOG(L"  install_device_hooks = %d\n", g_config.install_device_hooks);
     KLOG(L"  install_d3d9_vtable_hooks = %d\n", g_config.install_d3d9_vtable_hooks);
     KLOG(L"  install_d3d9_display_mode_hooks = %d\n", g_config.install_d3d9_display_mode_hooks);
-    KLOG(L"  force_multithreaded_device = %d\n", g_config.force_multithreaded_device);
     KLOG(L"  alternate_capture_mode = %d\n", g_config.alternate_capture_mode);
     KLOG(L"  render        = %ux%u (0,0 = no resolution override)\n",
          g_config.render_width, g_config.render_height);
