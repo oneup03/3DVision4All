@@ -5,7 +5,7 @@ This is a guide for setting up 3DVision for any 3D Display
 - Nvidia GPU is required
 - Windows 11 Works
 
-***Video Guide:***
+***Video Guide (Shader Glass method — outdated, kept for reference):***
 
 
 <a href="https://youtu.be/HciJ3LabhNk" target="_blank" rel="noopener noreferrer">
