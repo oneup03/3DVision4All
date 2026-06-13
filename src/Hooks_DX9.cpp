@@ -1082,7 +1082,8 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
         KLOG(L"  game focus HWND=%p\n", g_gameFocusHwnd);
     }
 
-    BehaviorFlags |= D3DCREATE_MULTITHREADED;
+    if (g_config.force_multithreaded_device)
+        BehaviorFlags |= D3DCREATE_MULTITHREADED;
 
     HRESULT hr = pOrigCreateDevice(This, Adapter, DeviceType, hFocusWindow,
                                    BehaviorFlags, pPresentationParameters,
