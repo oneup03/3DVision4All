@@ -3,6 +3,22 @@ Compatible with devices like:
 - Acer Spatial Labs
 - Samsung Odyssey 3D
 
+## SR Runtime Installation
+- Install the software package provided with your SR display (Samsung Odyssey 3D Hub or Acer TrueGame) — this installs the LeiaSR / Simulated Reality runtime that the injector hands frames off to
+
+{% include Injector.md %}
+
+## Configuration
+- In `3dvision4all.ini`, set `mode = leiasr`
+- The injector hands the stereo image to the LeiaSR weaver, which produces the autostereoscopic output natively on the SR panel — no ReShade or 3D Game Bridge required
+- Make sure your SR display is set as the primary display in Windows so the injector overlay shows on it
+- If 3D looks wrong, set `swap_eyes = 1`
+
+{% include InjectorPlay.md %}
+
+<details markdown="1">
+  <summary markdown="span">Show Shader Glass + 3D Game Bridge method (legacy)</summary>
+
 {% include ShaderGlass.md %}
 
 ## 3D Game Bridge Installation
@@ -30,6 +46,8 @@ Compatible with devices like:
 - Exit Shader Glass
 
 {% include ShaderGlassPlay.md %}
+
+</details>
 
 
 {% include Notes.md %}

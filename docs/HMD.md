@@ -1,8 +1,24 @@
 # VR HMDs with Virtual 3D Screens
-VR HMDs have a few options to play 3DVision games on a virtual screen
+VR HMDs have a few options to play 3DVision games on a virtual screen. The recommended path is the injector publishing to a VRScreenCap or Katanga viewer over IPC.
+
+{% include Injector.md %}
+
+## Configuration
+- In `3dvision4all.ini`, set `mode = katanga`
+- The injector publishes the stereo image to a Katanga-compatible VR viewer — your desktop display can stay as your regular monitor
+- The overlay window on your desktop also shows a SbS preview so you can verify capture even before the VR viewer attaches
+
+## VR Viewer (VRScreenCap recommended)
+- Download <a href="https://github.com/artumino/VRScreenCap" target="_blank" rel="noopener noreferrer">VRScreenCap</a> (or use Katanga from your `3DFM\Tools\Katanga` folder)
+- For VRScreenCap, create a desktop shortcut to `vr-screen-cap.exe` and append these parameters to `Target` for a slightly-curved virtual screen at a comfortable distance:
+  - `--x-curvature=0.1 --y-curvature=0.0 --distance=0.5 --scale=0.75`
+- Start your VR runtime (SteamVR / Meta Link / etc.) and launch the VRScreenCap (or Katanga) shortcut FIRST so the IPC server is listening
+- Then launch the game — the injector will publish frames to the viewer and you'll see the stereo image in your HMD
+
+{% include InjectorPlay.md %}
 
 <details markdown="1">
-  <summary markdown="span">Show HelixVision/Katanga</summary>
+  <summary markdown="span">Show HelixVision/Katanga (legacy)</summary>
 
 ## HelixVision/Katanga
 - Download <a href="https://bo3b.s3.us-east-1.amazonaws.com/fix_manager_1.87_katanga.7z" target="_blank" rel="noopener noreferrer">3D Fix Manager</a> for Katanga and to install 3DVision drivers
@@ -53,7 +69,7 @@ VR HMDs have a few options to play 3DVision games on a virtual screen
 
 </details>
 <details markdown="1">
-  <summary markdown="span">Show Virtual Desktop</summary>
+  <summary markdown="span">Show Virtual Desktop (TaB via Shader Glass)</summary>
 
 ## Top and Bottom / Over Under 3D
 - Install <a href="https://www.vrdesktop.net/" target="_blank" rel="noopener noreferrer">Virtual Desktop</a>
