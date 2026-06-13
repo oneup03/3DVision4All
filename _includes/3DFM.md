@@ -15,7 +15,7 @@
 - You can also adjust the 3D hotkeys and view the defaults on this tab:
 - <img width="693" height="740" alt="image" src="https://github.com/user-attachments/assets/71d9c5b9-0de5-46dc-9ef6-4548d06414ba" />
 - Select the `3D` toggle in the top right to turn off 3D
-- ***NOTE: A game needs a pre-existing Nvidia profile with the `StereoProfile` flag set appropriately for any 3D settings to save with `Ctrl + F7`.*** Reference <a href="https://wiki.bo3b.net/index.php?title=Driver_Profile_Settings" target="_blank" rel="noopener noreferrer">Bo3b's Profile Guide</a> for how to use Nvidia Inspector to set this and tweak 3D Profile settings.
+- ***NOTE: A game needs a pre-existing Nvidia profile with the `StereoProfile` flag set appropriately for any 3D settings to save with `Ctrl + F7`.*** Reference <a href="https://wiki.bo3b.net/index.php%3Ftitle=Driver_Profile_Settings.html" target="_blank" rel="noopener noreferrer">Bo3b's Profile Guide</a> for how to use Nvidia Inspector to set this and tweak 3D Profile settings.
 - If 3D Fix Manager doesn't work for you, you can try <a href="https://github.com/bo3b/3DV_Installer" target="_blank" rel="noopener noreferrer">Bo3b's 3DVision Installer</a>
 
 <details markdown="1">
