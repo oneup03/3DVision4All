@@ -187,6 +187,38 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
     KLOG(L"EnsureStereoStage: capture %ux%u format=%d, staging %ux%u\n",
          width, height, desc.Format, stagingWidth, stagingHeight);
 
+    // NvAPI stereo handle — created here (before any of our RT creation
+    // below) so we can wrap our CreateTexture calls in
+    // SetSurfaceCreationMode(FORCEMONO). With 3DVision active, the
+    // driver's profile heuristics may decide to create new RTs as a
+    // stereo pair (multi-layer / two-eye). That makes D3D9 refuse to
+    // hand out a shared handle (CreateTexture returns D3DERR_INVALIDCALL)
+    // and, when it doesn't refuse, makes D3D11's legacy
+    // OpenSharedResource reject the handle with E_INVALIDARG (it expects
+    // a mono ID3D11Texture2D, not a stereo pair). The heuristic varies
+    // by driver version and registry profile, which is why the same code
+    // path can succeed on one machine and fail on another. Our staging
+    // RTs are logically mono by design — g_stereoTex receives the
+    // reverse-stereo-blit output (a side-by-side mono image) and the
+    // shared RT is a format/swap intermediate — so forcing mono is the
+    // correct intent, not a workaround. Restored to AUTO after the
+    // creates so game RTs created later through other paths are
+    // unaffected.
+    if (!g_nvapi) {
+        NvAPI_Status nvres = NvAPI_Initialize();
+        if (nvres != NVAPI_OK) {
+            KLOG(L"EnsureStereoStage: NvAPI_Initialize failed %d\n", nvres);
+        } else {
+            nvres = NvAPI_Stereo_CreateHandleFromIUnknown(device, &g_nvapi);
+            if (nvres != NVAPI_OK) {
+                KLOG(L"EnsureStereoStage: NvAPI_Stereo_CreateHandleFromIUnknown failed %d\n", nvres);
+                g_nvapi = nullptr;
+            }
+        }
+    }
+    if (g_nvapi)
+        NvAPI_Stereo_SetSurfaceCreationMode(g_nvapi, NVAPI_STEREO_SURFACECREATEMODE_FORCEMONO);
+
     // 1) Non-shared RT — destination of reverse-stereo-blit, in the BB
     // format. Single instance (the reverse-stereo-blit always lands here
     // before we hand off to the shared/sysmem path).
@@ -195,6 +227,8 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
                                &g_stereoTex, nullptr);
     if (FAILED(hr)) {
         KLOG(L"EnsureStereoStage: CreateTexture(stereoTex) failed hr=0x%x\n", hr);
+        if (g_nvapi)
+            NvAPI_Stereo_SetSurfaceCreationMode(g_nvapi, NVAPI_STEREO_SURFACECREATEMODE_AUTO);
         return;
     }
     hr = g_stereoTex->GetSurfaceLevel(0, &g_stereoStage);
@@ -202,6 +236,8 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
         KLOG(L"EnsureStereoStage: GetSurfaceLevel(stereoStage) failed hr=0x%x\n", hr);
         g_stereoTex->Release();
         g_stereoTex = nullptr;
+        if (g_nvapi)
+            NvAPI_Stereo_SetSurfaceCreationMode(g_nvapi, NVAPI_STEREO_SURFACECREATEMODE_AUTO);
         return;
     }
 
@@ -332,6 +368,12 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
         }
     }
 
+    // Restore the driver's default surface-creation mode now that our
+    // staging RTs are built. Game-side RTs created later go through the
+    // normal stereo profile path.
+    if (g_nvapi)
+        NvAPI_Stereo_SetSurfaceCreationMode(g_nvapi, NVAPI_STEREO_SURFACECREATEMODE_AUTO);
+
     // Publish for Device B (Output_Overlay.cpp). Format is the SHARED
     // texture's format (always A8R8G8B8), not the BB format. sharedHandle
     // == nullptr signals the CPU path is active.
@@ -342,19 +384,6 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
 
     KLOG(L"EnsureStereoStage: published shared handle=%p (buf0=%p, buf1=%p)\n",
          g_stagingSharedHandle, g_sharedTex[0], g_sharedTex[1]);
-
-    // First-time NvAPI handle creation against this device.
-    if (!g_nvapi) {
-        NvAPI_Status nvres = NvAPI_Initialize();
-        if (nvres != NVAPI_OK) {
-            KLOG(L"EnsureStereoStage: NvAPI_Initialize failed %d\n", nvres);
-        } else {
-            nvres = NvAPI_Stereo_CreateHandleFromIUnknown(device, &g_nvapi);
-            if (nvres != NVAPI_OK) {
-                KLOG(L"EnsureStereoStage: NvAPI_Stereo_CreateHandleFromIUnknown failed %d\n", nvres);
-            }
-        }
-    }
 }
 
 
