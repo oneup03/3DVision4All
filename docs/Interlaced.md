@@ -149,6 +149,9 @@ _Required to select **4:4:4** in NVIDIA settings_
 - Configure the game resolution to match your native resolution, otherwise you won't get 3D
 
 
+{% include Notes.md %}
+
+
 <details markdown="1">
   <summary markdown="span">Show Injector method (alternative)</summary>
 
@@ -165,6 +168,3 @@ The injector composes a row- or column-interlaced image from regular stereo fram
 {% include InjectorPlay.md %}
 
 </details>
-
-
-{% include Notes.md %}

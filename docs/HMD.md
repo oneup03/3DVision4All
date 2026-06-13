@@ -6,18 +6,30 @@ VR HMDs have a few options to play 3DVision games on a virtual screen. The recom
 {% include Injector.md %}
 
 ## Configuration
+Pick one of the two VR viewer paths below.
+
+### Option 1: Katanga IPC + VRScreenCap (dedicated viewer)
 - In `3dvision4all.ini`, set `mode = katanga`
 - The injector publishes the stereo image to a Katanga-compatible VR viewer — your desktop display can stay as your regular monitor
 - The overlay window on your desktop also shows a SbS preview so you can verify capture even before the VR viewer attaches
-
-## VR Viewer (VRScreenCap recommended)
 - Download <a href="https://github.com/artumino/VRScreenCap" target="_blank" rel="noopener noreferrer">VRScreenCap</a> (or use Katanga from your `3DFM\Tools\Katanga` folder)
 - For VRScreenCap, create a desktop shortcut to `vr-screen-cap.exe` and append these parameters to `Target` for a slightly-curved virtual screen at a comfortable distance:
   - `--x-curvature=0.1 --y-curvature=0.0 --distance=0.5 --scale=0.75`
 - Start your VR runtime (SteamVR / Meta Link / etc.) and launch the VRScreenCap (or Katanga) shortcut FIRST so the IPC server is listening
 - Then launch the game — the injector will publish frames to the viewer and you'll see the stereo image in your HMD
 
+### Option 2: SbS + Virtual Desktop (already own VD)
+- In `3dvision4all.ini`, set `mode = sbs`
+- Install <a href="https://www.vrdesktop.net/" target="_blank" rel="noopener noreferrer">Virtual Desktop</a> and pair it with your HMD
+- Launch the game — the injector's fullscreen overlay shows the SbS image on your desktop
+- Put on the HMD and start Virtual Desktop
+- In Virtual Desktop's settings, set the 3D mode to `Side-by-Side`
+- Virtual Desktop displays the injector's SbS overlay as a stereo virtual screen in your HMD
+
 {% include InjectorPlay.md %}
+
+{% include Notes.md %}
+
 
 <details markdown="1">
   <summary markdown="span">Show HelixVision/Katanga (legacy)</summary>
@@ -93,6 +105,3 @@ VR HMDs have a few options to play 3DVision games on a virtual screen. The recom
 - Set the 3D mode to TaB/OU
 
 </details>
-
-
-{% include Notes.md %}

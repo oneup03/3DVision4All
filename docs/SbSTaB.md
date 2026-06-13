@@ -13,6 +13,9 @@
 
 {% include InjectorPlay.md %}
 
+{% include Notes.md %}
+
+
 <details markdown="1">
   <summary markdown="span">Show Shader Glass method (legacy)</summary>
 
@@ -21,6 +24,3 @@
 {% include ShaderGlassPlay.md %}
 
 </details>
-
-
-{% include Notes.md %}

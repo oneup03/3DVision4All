@@ -21,6 +21,9 @@ Compatible with devices like:
 
 {% include InjectorPlay.md %}
 
+{% include Notes.md %}
+
+
 <details markdown="1">
   <summary markdown="span">Show Shader Glass method (legacy)</summary>
 
@@ -36,6 +39,3 @@ Compatible with devices like:
 {% include ShaderGlassPlay.md %}
 
 </details>
-
-
-{% include Notes.md %}
