@@ -1,3 +1,10 @@
+***Video Guide (Shader Glass method):***
+
+<a href="https://youtu.be/HciJ3LabhNk" target="_blank" rel="noopener noreferrer">
+  <img src="https://img.youtube.com/vi/HciJ3LabhNk/hqdefault.jpg" alt="Video guide available here">
+</a>
+
+
 ## Hardware Requirements
 - Nvidia GPU
 - 3D Display (Can be AR Glasses, SR Display, etc)
