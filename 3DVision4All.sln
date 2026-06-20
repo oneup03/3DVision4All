@@ -12,6 +12,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Proxy_winmm", "proxy\Proxy_
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Proxy_version", "proxy\Proxy_version.vcxproj", "{B5F3A1E0-1234-4567-89AB-000000000013}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EnableWindowed3D", "tools\EnableWindowed3D\EnableWindowed3D.vcxproj", "{B5F3A1E0-1234-4567-89AB-000000000020}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Win32 = Debug|Win32
@@ -60,5 +62,13 @@ Global
 		{B5F3A1E0-1234-4567-89AB-000000000013}.Debug|x64.Build.0 = Debug|x64
 		{B5F3A1E0-1234-4567-89AB-000000000013}.Release|x64.ActiveCfg = Release|x64
 		{B5F3A1E0-1234-4567-89AB-000000000013}.Release|x64.Build.0 = Release|x64
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Debug|Win32.ActiveCfg = Debug|Win32
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Debug|Win32.Build.0 = Debug|Win32
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Release|Win32.ActiveCfg = Release|Win32
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Release|Win32.Build.0 = Release|Win32
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Debug|x64.ActiveCfg = Debug|x64
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Debug|x64.Build.0 = Debug|x64
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Release|x64.ActiveCfg = Release|x64
+		{B5F3A1E0-1234-4567-89AB-000000000020}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 EndGlobal

@@ -172,7 +172,7 @@ static bool RecreateSharedTexture(ID3D11Device* device,
 {
     DWORD waitRes = WaitForSingleObject(s_kSetupMutex, 1000);
     if (waitRes != WAIT_OBJECT_0) {
-        KLOG(L"Katanga: WaitForSingleObject(setup mutex) 0x%x — consumer may be gone\n",
+        KLOG(L"Katanga: WaitForSingleObject(setup mutex) 0x%x -- consumer may be gone\n",
              waitRes);
         return false;
     }

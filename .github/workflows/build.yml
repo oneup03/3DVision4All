@@ -66,7 +66,7 @@ jobs:
           /p:Configuration=Release-MD /p:Platform=${{ matrix.platform }}
           /m /v:minimal
 
-      - name: Build 3DVision4All (Core + proxies)
+      - name: Build 3DVision4All (Core + proxies + EnableWindowed3D)
         shell: cmd
         run: >
           msbuild 3DVision4All.sln
@@ -78,8 +78,9 @@ jobs:
         run: |
           $stage = "stage/3DVision4All-${{ matrix.platform }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "bin/${{ matrix.platform }}-Release/*.dll" -Destination $stage
-          Copy-Item "3dvision4all.ini"                         -Destination $stage
+          Copy-Item "bin/${{ matrix.platform }}-Release/*.dll"               -Destination $stage
+          Copy-Item "bin/${{ matrix.platform }}-Release/EnableWindowed3D.exe" -Destination $stage
+          Copy-Item "3dvision4all.ini"                                       -Destination $stage
           Compress-Archive -Path "$stage/*" -DestinationPath "3DVision4All-${{ matrix.platform }}-Release.zip" -Force
           Get-ChildItem "3DVision4All-${{ matrix.platform }}-Release.zip"
 
@@ -114,6 +115,8 @@ jobs:
             Auto-built pre-release from `${{ github.sha }}` on branch `${{ github.ref_name }}`.
 
             Drop the matching proxy DLL (whichever the target game statically imports — `dinput8`, `dsound`, `winmm`, or `version`) plus `3dvision4all.ini` into the game's EXE folder.
+
+            For DX9 titles where the in-process stereo handle activates but `IsActivated` stays 0 (NV ships the game in a predefined profile with stereo compatibility off — e.g. Batman Arkham Origins Blackgate HD), also drop `EnableWindowed3D.exe` into the same folder and right-click → Run as administrator once. It writes the hidden `StereoHiddenProfile` DRS flag for every `*.exe` in that folder so 3D Vision activates in windowed mode.
           prerelease: true
           make_latest: 'false'
           files: artifacts/*.zip

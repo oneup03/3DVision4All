@@ -89,6 +89,15 @@ static HRESULT (__stdcall *pOrigCreateDevice)(
     IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD,
     D3DPRESENT_PARAMETERS*, IDirect3DDevice9**) = nullptr;
 
+// CreateDeviceEx is a separate vtable slot from CreateDevice — games that
+// open an IDirect3D9Ex (we see "Hooked_Direct3DCreate9Ex" in the log) and
+// then create their device through CreateDeviceEx bypass our CreateDevice
+// hook entirely. Hook both so either path lands in our post-create setup.
+static HRESULT (__stdcall *pOrigCreateDeviceEx)(
+    IDirect3D9Ex*, UINT, D3DDEVTYPE, HWND, DWORD,
+    D3DPRESENT_PARAMETERS*, D3DDISPLAYMODEEX*,
+    IDirect3DDevice9Ex**) = nullptr;
+
 static HRESULT (__stdcall *pOrigGetAdapterDisplayMode)(
     IDirect3D9*, UINT, D3DDISPLAYMODE*) = nullptr;
 
@@ -101,8 +110,20 @@ static UINT    (__stdcall *pOrigGetAdapterModeCount)(
 static HRESULT (__stdcall *pOrigPresent)(
     IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*) = nullptr;
 
+// IDirect3DDevice9Ex::PresentEx is a separate vtable slot from Present —
+// games that go fully-Ex commonly call PresentEx directly. Without this
+// hook our Present hook never fires.
+static HRESULT (__stdcall *pOrigPresentEx)(
+    IDirect3DDevice9Ex*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD) = nullptr;
+
 static HRESULT (__stdcall *pOrigReset)(
     IDirect3DDevice9*, D3DPRESENT_PARAMETERS*) = nullptr;
+
+// IDirect3DDevice9Ex::ResetEx — same Ex-only-vtable-slot story as
+// PresentEx; an Ex game that toggles display modes likely calls ResetEx
+// rather than the inherited Reset.
+static HRESULT (__stdcall *pOrigResetEx)(
+    IDirect3DDevice9Ex*, D3DPRESENT_PARAMETERS*, D3DDISPLAYMODEEX*) = nullptr;
 
 static HRESULT (__stdcall *pOrigCreateAdditionalSwapChain)(
     IDirect3DDevice9*, D3DPRESENT_PARAMETERS*, IDirect3DSwapChain9**) = nullptr;
@@ -213,6 +234,20 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
             if (nvres != NVAPI_OK) {
                 KLOG(L"EnsureStereoStage: NvAPI_Stereo_CreateHandleFromIUnknown failed %d\n", nvres);
                 g_nvapi = nullptr;
+            } else {
+                // Force-activate stereo on this handle. CreateHandleFromIUnknown
+                // alone is not enough for games whose NV profile has stereo
+                // disabled (per-title compatibility flag) -- the driver
+                // creates the handle but leaves stereo inactive, so
+                // ReverseStereoBlit becomes a no-op (both halves of the
+                // capture surface get the same mono BB content). Explicit
+                // Activate overrides the profile default for this device.
+                // No-op when stereo is already active.
+                NvAPI_Status actres = NvAPI_Stereo_Activate(g_nvapi);
+                NvU8 isActive = 0;
+                NvAPI_Status chkres = NvAPI_Stereo_IsActivated(g_nvapi, &isActive);
+                KLOG(L"EnsureStereoStage: NvAPI_Stereo_Activate=%d IsActivated=%d (chk=%d)\n",
+                     actres, isActive, chkres);
             }
         }
     }
@@ -301,7 +336,7 @@ static void EnsureStereoStage(IDirect3DDevice9* device)
                 g_sharedSurface[1] = nullptr;
             }
         } else {
-            KLOG(L"EnsureStereoStage: CreateTexture(buf1) failed hr=0x%x — "
+            KLOG(L"EnsureStereoStage: CreateTexture(buf1) failed hr=0x%x -- "
                  L"capture thread will run with single buffer (reduced parallelism)\n", hr);
             g_sharedTex[1] = nullptr;
         }
@@ -619,6 +654,11 @@ static void PublishStereoFrame(IDirect3DDevice9* device)
 // exists for. Set in Hooked_CreateDevice.
 static bool s_viewportLockedFromInitialWindowed = false;
 
+// Shared between Hooked_CreateDevice and Hooked_CreateDeviceEx so the
+// first device-creation call (whichever path the game uses) is the one
+// that anchors the viewport lock.
+static bool s_capturedInitialDeviceCreate = false;
+
 static void ApplyPresentParamOverrides(D3DPRESENT_PARAMETERS* pp)
 {
     if (!pp) return;
@@ -749,48 +789,47 @@ static void MaybeResizeGameHwndToMonitor(HWND hwnd)
 
 static unsigned long s_frameCount = 0;
 
-static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
-                                         const RECT*    pSourceRect,
-                                         const RECT*    pDestRect,
-                                         HWND           hDestWindowOverride,
-                                         const RGNDATA* pDirtyRegion)
+// Per-frame stereo capture, shared by Hooked_Present and Hooked_PresentEx.
+// Runs BEFORE chaining through to the original Present/PresentEx so the
+// reverse-stereo-blit lands on the device's current backbuffer.
+static void PreFramePresentCapture(IDirect3DDevice9* device)
 {
-    EnsureStereoStage(This);
+    EnsureStereoStage(device);
 
     if (g_stereoStage) {
         IDirect3DSurface9* backBuffer = nullptr;
-        HRESULT hr = This->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer);
+        HRESULT hr = device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer);
         if (SUCCEEDED(hr) && backBuffer) {
 
             if (g_directMode) {
                 // Direct Mode: per-eye copy via SetActiveEye. Each eye fills
-                // half of the 2W×H non-shared staging surface.
+                // half of the 2W x H non-shared staging surface.
                 D3DSURFACE_DESC bbDesc;
                 backBuffer->GetDesc(&bbDesc);
 
                 RECT destRect = { 0, 0, (LONG)bbDesc.Width, (LONG)bbDesc.Height };
 
                 NvAPI_Stereo_SetActiveEye(g_nvapi, NVAPI_STEREO_EYE_RIGHT);
-                This->StretchRect(backBuffer, nullptr, g_stereoStage, &destRect, D3DTEXF_NONE);
+                device->StretchRect(backBuffer, nullptr, g_stereoStage, &destRect, D3DTEXF_NONE);
 
                 destRect.left  = bbDesc.Width;
                 destRect.right = bbDesc.Width * 2;
                 NvAPI_Stereo_SetActiveEye(g_nvapi, NVAPI_STEREO_EYE_LEFT);
-                This->StretchRect(backBuffer, nullptr, g_stereoStage, &destRect, D3DTEXF_NONE);
+                device->StretchRect(backBuffer, nullptr, g_stereoStage, &destRect, D3DTEXF_NONE);
 
                 // Then propagate to the shared texture for Device B,
                 // swapping halves if the user has set swap_eyes.
-                PublishStereoFrame(This);
+                PublishStereoFrame(device);
             }
             else {
                 // Automatic Mode: reverse-stereo-blit captures both eyes
-                // into the non-shared 2W×H staging surface in one
+                // into the non-shared 2W x H staging surface in one
                 // StretchRect, then we copy to the shared texture for
                 // Device B. Both StretchRects happen while ReverseStereo-
                 // BlitControl is TRUE.
                 NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, true);
-                This->StretchRect(backBuffer, nullptr, g_stereoStage, nullptr, D3DTEXF_NONE);
-                PublishStereoFrame(This);
+                device->StretchRect(backBuffer, nullptr, g_stereoStage, nullptr, D3DTEXF_NONE);
+                PublishStereoFrame(device);
                 NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, false);
             }
 
@@ -806,17 +845,47 @@ static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
         Overlay_StartOnce(g_gameFocusHwnd);
 
     s_frameCount++;
+}
 
+// Notify the overlay AFTER chaining through pOrigPresent / pOrigPresentEx
+// so the DX9 command queue (including our StretchRect to the shared
+// texture) is flushed before Device B starts sampling. Without this,
+// Device B can race ahead and sample uninitialized / partial content from
+// the shared texture even though Device A's queued StretchRects haven't
+// reached the GPU yet.
+static void PostFramePresentNotify()
+{
+    Overlay_NotifyFrame();
+}
+
+static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
+                                         const RECT*    pSourceRect,
+                                         const RECT*    pDestRect,
+                                         HWND           hDestWindowOverride,
+                                         const RGNDATA* pDirtyRegion)
+{
+    PreFramePresentCapture(This);
     HRESULT presentHr = pOrigPresent(This, pSourceRect, pDestRect,
                                      hDestWindowOverride, pDirtyRegion);
+    PostFramePresentNotify();
+    return presentHr;
+}
 
-    // Notify the overlay AFTER pOrigPresent so the DX9 command queue
-    // (including our StretchRect to the shared texture) is flushed before
-    // Device B starts sampling. Without this, Device B can race ahead and
-    // sample uninitialized / partial content from the shared texture even
-    // though Device A's queued StretchRects haven't reached the GPU yet.
-    Overlay_NotifyFrame();
-
+// IDirect3DDevice9Ex::PresentEx hook. Same capture/notify body as
+// Hooked_Present; only the chain-through call differs (extra DWORD
+// dwFlags). Installed alongside Present in PostDeviceCreateSetup when
+// the returned device QIs to IDirect3DDevice9Ex.
+static HRESULT __stdcall Hooked_PresentEx(IDirect3DDevice9Ex* This,
+                                           const RECT*    pSourceRect,
+                                           const RECT*    pDestRect,
+                                           HWND           hDestWindowOverride,
+                                           const RGNDATA* pDirtyRegion,
+                                           DWORD          dwFlags)
+{
+    PreFramePresentCapture(This);
+    HRESULT presentHr = pOrigPresentEx(This, pSourceRect, pDestRect,
+                                       hDestWindowOverride, pDirtyRegion, dwFlags);
+    PostFramePresentNotify();
     return presentHr;
 }
 
@@ -825,32 +894,34 @@ static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
 // Hooked Reset — staging is invalidated on device reset; recreate lazily
 // from the next Present.
 
-static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
-                                       D3DPRESENT_PARAMETERS* pPresentationParameters)
+// Shared pre-call body for Hooked_Reset and Hooked_ResetEx: log incoming
+// params, apply overrides, log overridden params, release the stereo
+// staging surfaces. The label distinguishes the two paths in the log.
+static void PreResetCommon(D3DPRESENT_PARAMETERS* pp, const wchar_t* label)
 {
-    KLOG(L"Hooked_Reset called\n");
-    if (pPresentationParameters) {
+    KLOG(L"%s called\n", label);
+    if (pp) {
         KLOG(L"  game asked: %dx%d format=%d windowed=%d\n",
-             pPresentationParameters->BackBufferWidth,
-             pPresentationParameters->BackBufferHeight,
-             pPresentationParameters->BackBufferFormat,
-             pPresentationParameters->Windowed);
+             pp->BackBufferWidth, pp->BackBufferHeight,
+             pp->BackBufferFormat, pp->Windowed);
     }
 
-    ApplyPresentParamOverrides(pPresentationParameters);
-    if (pPresentationParameters) {
+    ApplyPresentParamOverrides(pp);
+    if (pp) {
         KLOG(L"  override:   %dx%d windowed=%d refresh=%d\n",
-             pPresentationParameters->BackBufferWidth,
-             pPresentationParameters->BackBufferHeight,
-             pPresentationParameters->Windowed,
-             pPresentationParameters->FullScreen_RefreshRateInHz);
+             pp->BackBufferWidth, pp->BackBufferHeight,
+             pp->Windowed, pp->FullScreen_RefreshRateInHz);
     }
 
     ReleaseStereoStage();
+}
 
-    HRESULT resetHr = pOrigReset(This, pPresentationParameters);
-
-    // Reset may have stripped WS_EX_LAYERED; re-assert.
+// Shared post-call body for Hooked_Reset and Hooked_ResetEx: re-assert
+// WS_EX_LAYERED (defeat-DirectFlip), resize HWND to monitor, re-assert
+// subclass. Reset may have stripped WS_EX_LAYERED and shrunk the HWND
+// back to the new BB size, so both need re-assertion.
+static void PostResetCommon()
+{
     if (g_config.defeat_directflip && g_gameFocusHwnd) {
         LONG exStyle = GetWindowLongW(g_gameFocusHwnd, GWL_EXSTYLE);
         if (!(exStyle & WS_EX_LAYERED)) {
@@ -860,14 +931,40 @@ static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
         }
     }
 
-    // Reset can shrink the HWND back to the new BB size — re-assert.
     MaybeResizeGameHwndToMonitor(g_gameFocusHwnd);
-
-    // Re-assert subclass (defensive — Reset shouldn't swap WndProcs, but
-    // if the game's UI thread did anything to its window during reset
-    // we want to be sure we're still on the chain).
     MaybeSubclassGameHwnd(g_gameFocusHwnd);
+}
 
+static HRESULT __stdcall Hooked_Reset(IDirect3DDevice9* This,
+                                       D3DPRESENT_PARAMETERS* pPresentationParameters)
+{
+    PreResetCommon(pPresentationParameters, L"Hooked_Reset");
+    HRESULT resetHr = pOrigReset(This, pPresentationParameters);
+    PostResetCommon();
+    return resetHr;
+}
+
+// IDirect3DDevice9Ex::ResetEx hook. Mirrors Hooked_Reset; the only
+// signature difference is the extra D3DDISPLAYMODEEX* parameter, which
+// MUST be NULL when pp->Windowed == TRUE (same spec rule as
+// CreateDeviceEx). After force_windowed flips Windowed->TRUE we have to
+// nil the pointer or the original call returns D3DERR_INVALIDCALL.
+static HRESULT __stdcall Hooked_ResetEx(IDirect3DDevice9Ex* This,
+                                         D3DPRESENT_PARAMETERS* pPresentationParameters,
+                                         D3DDISPLAYMODEEX* pFullscreenDisplayMode)
+{
+    PreResetCommon(pPresentationParameters, L"Hooked_ResetEx");
+
+    if (pPresentationParameters && pPresentationParameters->Windowed) {
+        if (pFullscreenDisplayMode) {
+            KLOG(L"  force_windowed flipped Windowed->TRUE -- "
+                 L"clearing pFullscreenDisplayMode (Ex spec requires NULL)\n");
+        }
+        pFullscreenDisplayMode = nullptr;
+    }
+
+    HRESULT resetHr = pOrigResetEx(This, pPresentationParameters, pFullscreenDisplayMode);
+    PostResetCommon();
     return resetHr;
 }
 
@@ -1034,67 +1131,44 @@ static HRESULT __stdcall Hooked_EnumAdapterModes(IDirect3D9* This,
 // Hooked CreateDevice — chains Present / Reset / Create* hooks off the
 // returned device.
 
-static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
-    UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags,
-    D3DPRESENT_PARAMETERS* pPresentationParameters,
-    IDirect3DDevice9** ppReturnedDeviceInterface)
+// Capture the focus HWND for the overlay-window output path. Prefer
+// hDeviceWindow (the swap chain's window); fall back to hFocusWindow.
+// Shared by Hooked_CreateDevice and Hooked_CreateDeviceEx.
+static void CaptureGameFocusHwnd(D3DPRESENT_PARAMETERS* pp, HWND hFocusWindow)
 {
-    KLOG(L"Hooked_CreateDevice\n");
-    if (pPresentationParameters) {
-        KLOG(L"  game asked: %dx%d format=%d windowed=%d swap_effect=%d\n",
-             pPresentationParameters->BackBufferWidth,
-             pPresentationParameters->BackBufferHeight,
-             pPresentationParameters->BackBufferFormat,
-             pPresentationParameters->Windowed,
-             pPresentationParameters->SwapEffect);
-    }
-
-    // Sticky viewport lock — see comment on s_viewportLockedFromInitialWindowed.
-    // Captured here (not in ApplyPresentParamOverrides) so the lock is anchored
-    // to the FIRST CreateDevice's game intent, regardless of how many Resets
-    // happen later.
-    static bool s_capturedInitial = false;
-    if (!s_capturedInitial && pPresentationParameters) {
-        s_capturedInitial = true;
-        if (pPresentationParameters->Windowed) {
-            s_viewportLockedFromInitialWindowed = true;
-            KLOG(L"  initial CreateDevice was windowed — "
-                 L"viewport-locked, BB dim override suppressed for this process\n");
-        }
-    }
-
-    ApplyPresentParamOverrides(pPresentationParameters);
-    if (pPresentationParameters) {
-        KLOG(L"  override:   %dx%d windowed=%d refresh=%d\n",
-             pPresentationParameters->BackBufferWidth,
-             pPresentationParameters->BackBufferHeight,
-             pPresentationParameters->Windowed,
-             pPresentationParameters->FullScreen_RefreshRateInHz);
-    }
-
-    // Capture the focus HWND for the overlay-window output path. Prefer
-    // hDeviceWindow (the swap chain's window); fall back to hFocusWindow.
-    HWND gameHwnd = (pPresentationParameters && pPresentationParameters->hDeviceWindow)
-                  ? pPresentationParameters->hDeviceWindow
-                  : hFocusWindow;
+    HWND gameHwnd = (pp && pp->hDeviceWindow) ? pp->hDeviceWindow : hFocusWindow;
     if (gameHwnd && gameHwnd != g_gameFocusHwnd) {
         g_gameFocusHwnd = gameHwnd;
         KLOG(L"  game focus HWND=%p\n", g_gameFocusHwnd);
     }
+}
 
-    BehaviorFlags |= D3DCREATE_MULTITHREADED;
-
-    HRESULT hr = pOrigCreateDevice(This, Adapter, DeviceType, hFocusWindow,
-                                   BehaviorFlags, pPresentationParameters,
-                                   ppReturnedDeviceInterface);
-    if (FAILED(hr)) {
-        KLOG(L"Hooked_CreateDevice: original failed hr=0x%x\n", hr);
-        return hr;
+// Sticky viewport lock — see comment on s_viewportLockedFromInitialWindowed.
+// Captured outside ApplyPresentParamOverrides so the lock is anchored to
+// the FIRST device-creation call's game intent, regardless of how many
+// Resets happen later, and regardless of whether the game went through
+// CreateDevice or CreateDeviceEx.
+static void CaptureInitialWindowedIntent(D3DPRESENT_PARAMETERS* pp,
+                                         const wchar_t* createCallLabel)
+{
+    if (s_capturedInitialDeviceCreate || !pp) return;
+    s_capturedInitialDeviceCreate = true;
+    if (pp->Windowed) {
+        s_viewportLockedFromInitialWindowed = true;
+        KLOG(L"  initial %s was windowed -- "
+             L"viewport-locked, BB dim override suppressed for this process\n",
+             createCallLabel);
     }
+}
 
-    IDirect3DDevice9* pDevice9 = ppReturnedDeviceInterface ? *ppReturnedDeviceInterface : nullptr;
-    KLOG(L"  CreateDevice returned device=%p\n", pDevice9);
-
+// Post-original-call setup shared by both CreateDevice paths: defeat
+// DirectFlip, subclass game HWND, resize HWND to monitor, install the
+// per-device vtable hooks (Present, Reset, Create*). Device9Ex inherits
+// IDirect3DDevice9's vtable layout for these slots, so callers can pass
+// an upcast IDirect3DDevice9Ex* and the existing lpvtbl_* extractors
+// work unmodified.
+static void PostDeviceCreateSetup(IDirect3DDevice9* pDevice9)
+{
     // Defeat DirectFlip / Independent Flip on the game's window. DWM cannot
     // DirectFlip a layered window's swap chain, so it routes the game's
     // swap chain through the redirection surface — and our topmost overlay
@@ -1113,53 +1187,185 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
     MaybeResizeGameHwndToMonitor(g_gameFocusHwnd);
 
     if (!g_config.install_device_hooks) {
-        KLOG(L"  install_device_hooks=0 — skipping Present/Reset/Create* hooks\n");
+        KLOG(L"  install_device_hooks=0 -- skipping Present/Reset/Create* hooks\n");
+        return;
     }
-    if (g_config.install_device_hooks && pOrigPresent == nullptr && pDevice9) {
-        SIZE_T hook_id = 0;
-        DWORD dwOsErr;
+    if (pOrigPresent != nullptr || !pDevice9) return;
 
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigPresent,
-                                   lpvtbl_Present_DX9(pDevice9), Hooked_Present, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook Present 0x%x\n", dwOsErr);
-        else                 KLOG(L"Hooked Present\n");
+    SIZE_T hook_id = 0;
+    DWORD dwOsErr;
 
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigReset,
-                                   lpvtbl_Reset(pDevice9), Hooked_Reset, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook Reset 0x%x\n", dwOsErr);
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigPresent,
+                               lpvtbl_Present_DX9(pDevice9), Hooked_Present, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook Present 0x%x\n", dwOsErr);
+    else                 KLOG(L"Hooked Present\n");
 
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateAdditionalSwapChain,
-                                   lpvtbl_CreateAdditionalSwapChain(pDevice9),
-                                   Hooked_CreateAdditionalSwapChain, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateAdditionalSwapChain 0x%x\n", dwOsErr);
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigReset,
+                               lpvtbl_Reset(pDevice9), Hooked_Reset, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook Reset 0x%x\n", dwOsErr);
 
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateTexture,
-                                   lpvtbl_CreateTexture(pDevice9), Hooked_CreateTexture, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateTexture 0x%x\n", dwOsErr);
+    // If the returned device is actually IDirect3DDevice9Ex, also hook
+    // PresentEx and ResetEx — Ex games typically call those Ex-only
+    // vtable slots directly instead of the inherited Present/Reset, so
+    // without these hooks neither per-frame stereo capture nor our
+    // force_windowed override on device reset would ever fire.
+    IDirect3DDevice9Ex* pDevice9Ex = nullptr;
+    if (SUCCEEDED(pDevice9->QueryInterface(__uuidof(IDirect3DDevice9Ex),
+                                           (void**)&pDevice9Ex)) && pDevice9Ex) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigPresentEx,
+                                   lpvtbl_PresentEx_DX9(pDevice9), Hooked_PresentEx, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook PresentEx 0x%x\n", dwOsErr);
+        else                 KLOG(L"Hooked PresentEx\n");
 
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateCubeTexture,
-                                   lpvtbl_CreateCubeTexture(pDevice9), Hooked_CreateCubeTexture, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateCubeTexture 0x%x\n", dwOsErr);
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigResetEx,
+                                   lpvtbl_ResetEx(pDevice9), Hooked_ResetEx, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook ResetEx 0x%x\n", dwOsErr);
+        else                 KLOG(L"Hooked ResetEx\n");
 
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateVolumeTexture,
-                                   lpvtbl_CreateVolumeTexture(pDevice9), Hooked_CreateVolumeTexture, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateVolumeTexture 0x%x\n", dwOsErr);
-
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateOffscreenPlainSurface,
-                                   lpvtbl_CreateOffscreenPlainSurface(pDevice9), Hooked_CreateOffscreenPlainSurface, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateOffscreenPlainSurface 0x%x\n", dwOsErr);
-
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateVertexBuffer,
-                                   lpvtbl_CreateVertexBuffer(pDevice9), Hooked_CreateVertexBuffer, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateVertexBuffer 0x%x\n", dwOsErr);
-
-        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateIndexBuffer,
-                                   lpvtbl_CreateIndexBuffer(pDevice9), Hooked_CreateIndexBuffer, 0);
-        if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateIndexBuffer 0x%x\n", dwOsErr);
-
-        // NvAPI handle is created lazily in EnsureStereoStage on first Present.
+        pDevice9Ex->Release();
     }
 
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateAdditionalSwapChain,
+                               lpvtbl_CreateAdditionalSwapChain(pDevice9),
+                               Hooked_CreateAdditionalSwapChain, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateAdditionalSwapChain 0x%x\n", dwOsErr);
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateTexture,
+                               lpvtbl_CreateTexture(pDevice9), Hooked_CreateTexture, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateTexture 0x%x\n", dwOsErr);
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateCubeTexture,
+                               lpvtbl_CreateCubeTexture(pDevice9), Hooked_CreateCubeTexture, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateCubeTexture 0x%x\n", dwOsErr);
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateVolumeTexture,
+                               lpvtbl_CreateVolumeTexture(pDevice9), Hooked_CreateVolumeTexture, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateVolumeTexture 0x%x\n", dwOsErr);
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateOffscreenPlainSurface,
+                               lpvtbl_CreateOffscreenPlainSurface(pDevice9), Hooked_CreateOffscreenPlainSurface, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateOffscreenPlainSurface 0x%x\n", dwOsErr);
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateVertexBuffer,
+                               lpvtbl_CreateVertexBuffer(pDevice9), Hooked_CreateVertexBuffer, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateVertexBuffer 0x%x\n", dwOsErr);
+
+    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateIndexBuffer,
+                               lpvtbl_CreateIndexBuffer(pDevice9), Hooked_CreateIndexBuffer, 0);
+    if (FAILED(dwOsErr)) KLOG(L"Failed to hook CreateIndexBuffer 0x%x\n", dwOsErr);
+
+    // NvAPI handle is created lazily in EnsureStereoStage on first Present.
+}
+
+
+static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
+    UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags,
+    D3DPRESENT_PARAMETERS* pPresentationParameters,
+    IDirect3DDevice9** ppReturnedDeviceInterface)
+{
+    KLOG(L"Hooked_CreateDevice\n");
+    if (pPresentationParameters) {
+        KLOG(L"  game asked: %dx%d format=%d windowed=%d swap_effect=%d\n",
+             pPresentationParameters->BackBufferWidth,
+             pPresentationParameters->BackBufferHeight,
+             pPresentationParameters->BackBufferFormat,
+             pPresentationParameters->Windowed,
+             pPresentationParameters->SwapEffect);
+    }
+
+    CaptureInitialWindowedIntent(pPresentationParameters, L"CreateDevice");
+    ApplyPresentParamOverrides(pPresentationParameters);
+    if (pPresentationParameters) {
+        KLOG(L"  override:   %dx%d windowed=%d refresh=%d\n",
+             pPresentationParameters->BackBufferWidth,
+             pPresentationParameters->BackBufferHeight,
+             pPresentationParameters->Windowed,
+             pPresentationParameters->FullScreen_RefreshRateInHz);
+    }
+
+    CaptureGameFocusHwnd(pPresentationParameters, hFocusWindow);
+
+    BehaviorFlags |= D3DCREATE_MULTITHREADED;
+
+    HRESULT hr = pOrigCreateDevice(This, Adapter, DeviceType, hFocusWindow,
+                                   BehaviorFlags, pPresentationParameters,
+                                   ppReturnedDeviceInterface);
+    if (FAILED(hr)) {
+        KLOG(L"Hooked_CreateDevice: original failed hr=0x%x\n", hr);
+        return hr;
+    }
+
+    IDirect3DDevice9* pDevice9 = ppReturnedDeviceInterface ? *ppReturnedDeviceInterface : nullptr;
+    KLOG(L"  CreateDevice returned device=%p\n", pDevice9);
+
+    PostDeviceCreateSetup(pDevice9);
+    return hr;
+}
+
+
+// Mirror of Hooked_CreateDevice for IDirect3D9Ex::CreateDeviceEx — a
+// distinct vtable slot from CreateDevice (Ex vtable index 20), so games
+// that open Ex and then call CreateDeviceEx directly bypass the
+// CreateDevice hook entirely without this hook in place. Returned
+// IDirect3DDevice9Ex inherits IDirect3DDevice9's vtable layout for
+// Present/Reset/Create*, so PostDeviceCreateSetup applies unchanged on
+// the upcast pointer.
+static HRESULT __stdcall Hooked_CreateDeviceEx(IDirect3D9Ex* This,
+    UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags,
+    D3DPRESENT_PARAMETERS* pPresentationParameters,
+    D3DDISPLAYMODEEX* pFullscreenDisplayMode,
+    IDirect3DDevice9Ex** ppReturnedDeviceInterface)
+{
+    KLOG(L"Hooked_CreateDeviceEx\n");
+    if (pPresentationParameters) {
+        KLOG(L"  game asked: %dx%d format=%d windowed=%d swap_effect=%d\n",
+             pPresentationParameters->BackBufferWidth,
+             pPresentationParameters->BackBufferHeight,
+             pPresentationParameters->BackBufferFormat,
+             pPresentationParameters->Windowed,
+             pPresentationParameters->SwapEffect);
+    }
+
+    CaptureInitialWindowedIntent(pPresentationParameters, L"CreateDeviceEx");
+    ApplyPresentParamOverrides(pPresentationParameters);
+
+    // CreateDeviceEx spec: when pp->Windowed == TRUE,
+    // pFullscreenDisplayMode MUST be NULL (otherwise D3DERR_INVALIDCALL).
+    // After force_windowed flips Windowed→TRUE we have to nil the
+    // pointer or the original call fails with the override applied.
+    if (pPresentationParameters && pPresentationParameters->Windowed) {
+        if (pFullscreenDisplayMode) {
+            KLOG(L"  force_windowed flipped Windowed->TRUE -- "
+                 L"clearing pFullscreenDisplayMode (Ex spec requires NULL)\n");
+        }
+        pFullscreenDisplayMode = nullptr;
+    }
+
+    if (pPresentationParameters) {
+        KLOG(L"  override:   %dx%d windowed=%d refresh=%d\n",
+             pPresentationParameters->BackBufferWidth,
+             pPresentationParameters->BackBufferHeight,
+             pPresentationParameters->Windowed,
+             pPresentationParameters->FullScreen_RefreshRateInHz);
+    }
+
+    CaptureGameFocusHwnd(pPresentationParameters, hFocusWindow);
+
+    BehaviorFlags |= D3DCREATE_MULTITHREADED;
+
+    HRESULT hr = pOrigCreateDeviceEx(This, Adapter, DeviceType, hFocusWindow,
+                                     BehaviorFlags, pPresentationParameters,
+                                     pFullscreenDisplayMode,
+                                     ppReturnedDeviceInterface);
+    if (FAILED(hr)) {
+        KLOG(L"Hooked_CreateDeviceEx: original failed hr=0x%x\n", hr);
+        return hr;
+    }
+
+    IDirect3DDevice9Ex* pDevice9Ex = ppReturnedDeviceInterface ? *ppReturnedDeviceInterface : nullptr;
+    KLOG(L"  CreateDeviceEx returned device=%p\n", pDevice9Ex);
+
+    PostDeviceCreateSetup(pDevice9Ex);
     return hr;
 }
 
@@ -1175,20 +1381,39 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
 // object before handing it back to the EXE.
 void DX9_InstallVtableHooksOn(IDirect3D9* pDX9)
 {
-    if (pOrigCreateDevice != nullptr || !pDX9) return;
+    if (!pDX9) return;
     if (!g_config.install_d3d9_vtable_hooks) {
-        KLOG(L"DX9_InstallVtableHooksOn: install_d3d9_vtable_hooks=0 — skipping\n");
+        KLOG(L"DX9_InstallVtableHooksOn: install_d3d9_vtable_hooks=0 -- skipping\n");
         return;
     }
 
     SIZE_T hook_id = 0;
     DWORD dwOsErr;
 
-    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateDevice,
-                               lpvtbl_CreateDevice(pDX9),
-                               Hooked_CreateDevice, 0);
-    if (FAILED(dwOsErr)) KLOG(L"Failed to hook IDirect3D9::CreateDevice 0x%x\n", dwOsErr);
-    else                 KLOG(L"Hooked IDirect3D9::CreateDevice\n");
+    if (pOrigCreateDevice == nullptr) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateDevice,
+                                   lpvtbl_CreateDevice(pDX9),
+                                   Hooked_CreateDevice, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook IDirect3D9::CreateDevice 0x%x\n", dwOsErr);
+        else                 KLOG(L"Hooked IDirect3D9::CreateDevice\n");
+    }
+
+    // If the IDirect3D9 we got handed back is actually an IDirect3D9Ex,
+    // hook CreateDeviceEx too. Many modern DX9 games (and Batman Arkham
+    // Origins Blackgate is one) take the Ex path and call CreateDeviceEx
+    // directly, never touching the IDirect3D9::CreateDevice slot.
+    if (pOrigCreateDeviceEx == nullptr) {
+        IDirect3D9Ex* pDX9Ex = nullptr;
+        if (SUCCEEDED(pDX9->QueryInterface(__uuidof(IDirect3D9Ex),
+                                           (void**)&pDX9Ex)) && pDX9Ex) {
+            dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigCreateDeviceEx,
+                                       lpvtbl_CreateDeviceEx(pDX9),
+                                       Hooked_CreateDeviceEx, 0);
+            if (FAILED(dwOsErr)) KLOG(L"Failed to hook IDirect3D9Ex::CreateDeviceEx 0x%x\n", dwOsErr);
+            else                 KLOG(L"Hooked IDirect3D9Ex::CreateDeviceEx\n");
+            pDX9Ex->Release();
+        }
+    }
 
     if (!g_config.install_d3d9_display_mode_hooks) {
         KLOG(L"DX9_InstallVtableHooksOn: install_d3d9_display_mode_hooks=0 "
@@ -1196,23 +1421,29 @@ void DX9_InstallVtableHooksOn(IDirect3D9* pDX9)
         return;
     }
 
-    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterDisplayMode,
-                               lpvtbl_GetAdapterDisplayMode(pDX9),
-                               Hooked_GetAdapterDisplayMode, 0);
-    if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterDisplayMode 0x%x\n", dwOsErr);
-    else                 KLOG(L"Hooked IDirect3D9::GetAdapterDisplayMode\n");
+    if (pOrigGetAdapterDisplayMode == nullptr) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterDisplayMode,
+                                   lpvtbl_GetAdapterDisplayMode(pDX9),
+                                   Hooked_GetAdapterDisplayMode, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterDisplayMode 0x%x\n", dwOsErr);
+        else                 KLOG(L"Hooked IDirect3D9::GetAdapterDisplayMode\n");
+    }
 
-    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigEnumAdapterModes,
-                               lpvtbl_EnumAdapterModes(pDX9),
-                               Hooked_EnumAdapterModes, 0);
-    if (FAILED(dwOsErr)) KLOG(L"Failed to hook EnumAdapterModes 0x%x\n", dwOsErr);
-    else                 KLOG(L"Hooked IDirect3D9::EnumAdapterModes\n");
+    if (pOrigEnumAdapterModes == nullptr) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigEnumAdapterModes,
+                                   lpvtbl_EnumAdapterModes(pDX9),
+                                   Hooked_EnumAdapterModes, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook EnumAdapterModes 0x%x\n", dwOsErr);
+        else                 KLOG(L"Hooked IDirect3D9::EnumAdapterModes\n");
+    }
 
-    dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterModeCount,
-                               lpvtbl_GetAdapterModeCount(pDX9),
-                               Hooked_GetAdapterModeCount, 0);
-    if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterModeCount 0x%x\n", dwOsErr);
-    else                 KLOG(L"Hooked IDirect3D9::GetAdapterModeCount\n");
+    if (pOrigGetAdapterModeCount == nullptr) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigGetAdapterModeCount,
+                                   lpvtbl_GetAdapterModeCount(pDX9),
+                                   Hooked_GetAdapterModeCount, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook GetAdapterModeCount 0x%x\n", dwOsErr);
+        else                 KLOG(L"Hooked IDirect3D9::GetAdapterModeCount\n");
+    }
 }
 
 
@@ -1239,7 +1470,7 @@ static IDirect3D9* __stdcall Hooked_Direct3DCreate9(UINT SDKVersion)
     KLOG(L"Hooked_Direct3DCreate9 SDK=%d\n", SDKVersion);
 
     if (!g_config.alternate_capture_mode) {
-        KLOG(L"  alternate_capture_mode=0 — keeping plain DX9 device\n");
+        KLOG(L"  alternate_capture_mode=0 -- keeping plain DX9 device\n");
         IDirect3D9* pDX9 = pOrigDirect3DCreate9(SDKVersion);
         if (!pDX9) {
             KLOG(L"  pOrigDirect3DCreate9 returned NULL\n");

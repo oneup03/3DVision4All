@@ -393,11 +393,14 @@ extern volatile LONG    g_stagingCpuFresh;
 // compiled as straight C using CINTERFACE.
 
 extern "C" LPVOID lpvtbl_CreateDevice(IDirect3D9* pDX9);
+extern "C" LPVOID lpvtbl_CreateDeviceEx(IDirect3D9* pDX9Ex);
 extern "C" LPVOID lpvtbl_GetAdapterDisplayMode(IDirect3D9* pDX9);
 extern "C" LPVOID lpvtbl_EnumAdapterModes(IDirect3D9* pDX9);
 extern "C" LPVOID lpvtbl_GetAdapterModeCount(IDirect3D9* pDX9);
 extern "C" LPVOID lpvtbl_Present_DX9(IDirect3DDevice9* pDX9Device);
+extern "C" LPVOID lpvtbl_PresentEx_DX9(IDirect3DDevice9* pDX9DeviceEx);
 extern "C" LPVOID lpvtbl_Reset(IDirect3DDevice9* pDX9Device);
+extern "C" LPVOID lpvtbl_ResetEx(IDirect3DDevice9* pDX9DeviceEx);
 extern "C" LPVOID lpvtbl_CreateAdditionalSwapChain(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateTexture(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateCubeTexture(IDirect3DDevice9* pDX9Device);

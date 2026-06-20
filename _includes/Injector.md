@@ -25,6 +25,10 @@
 - Copy ONE of the proxy DLLs (`dinput8.dll`, `dsound.dll`, `version.dll`, `winmm.dll`) from the extracted folder into the same folder as the game's EXE
   - Pick one the game doesn't already ship with so you don't overwrite anything important — `dinput8.dll` is usually safe
 - Copy `3dvision4all.ini` from the extracted zip into the same folder, next to the proxy DLL
+- Copy `EnableWindowed3D.exe` from the extracted zip into the same folder, then **right-click → Run as administrator** (UAC prompt). This is a one-shot setup step that's required for 3DVision4All to work properly — the tool scans the folder and, for every `*.exe` it finds, creates an NVIDIA stereo profile (or attaches to an existing one) and writes two settings: `StereoProfile = 1` and `StereoHiddenProfile = 1`. The combination does two things you need:
+  - **Enables 3D Vision in windowed mode** for that EXE. 3DVision4All forces the game into windowed mode so it can composite its overlay on top, but the 3D Vision driver only flips stereo "active" for windowed swap chains when these profile flags are set. Without them, the per-frame ReverseStereoBlit silently no-ops and both halves of the captured frame carry the same mono image (no parallax — flat 2D on your stereo display)
+  - **Lets you save Depth and Convergence via Ctrl+F7 in-game.** `StereoProfile` is what marks the profile as a real stereo profile to the driver; with it missing, the in-game save shortcut silently restores the default convergence instead of saving your tuning
+  - Run the tool once per game folder. You can leave or delete `EnableWindowed3D.exe` afterwards — only the proxy DLL + INI need to stay alongside the game
 
 
 ## Injector Options Reference

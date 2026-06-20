@@ -126,4 +126,65 @@ LPVOID lpvtbl_CreateIndexBuffer(IDirect3DDevice9* pDX9Device)
     return pDX9Device->lpVtbl->CreateIndexBuffer;
 }
 
+// CreateDeviceEx lives on IDirect3D9Ex (not the plain IDirect3D9 base) at
+// vtable index 20. We extract it by manual offset because this TU sets
+// D3D_DISABLE_9EX at the top to keep the C interface clean across SDK
+// versions, which hides the Ex vtable struct. Caller must guarantee the
+// passed pointer is actually an IDirect3D9Ex (verify via QueryInterface).
+//
+// Vtable layout: IUnknown(0..2) + IDirect3D9(3..16) + IDirect3D9Ex(17..21):
+//   17 GetAdapterModeCountEx
+//   18 EnumAdapterModesEx
+//   19 GetAdapterDisplayModeEx
+//   20 CreateDeviceEx
+//   21 GetAdapterLUID
+LPVOID lpvtbl_CreateDeviceEx(IDirect3D9* pDX9Ex)
+{
+    LPVOID* vtbl;
+    if (!pDX9Ex)
+        return NULL;
+    vtbl = *(LPVOID**)pDX9Ex;
+    return vtbl[20];
+}
+
+// PresentEx and ResetEx live on IDirect3DDevice9Ex. Caller must guarantee
+// the passed pointer is actually an IDirect3DDevice9Ex (verify via
+// QueryInterface). Same D3D_DISABLE_9EX manual-offset reason as above.
+//
+// IDirect3DDevice9Ex vtable, after the 3 IUnknown slots and 116 plain
+// IDirect3DDevice9 slots (positions 0..118), continues with 15 Ex-only
+// methods starting at slot 119:
+//   119 SetConvolutionMonoKernel
+//   120 ComposeRects
+//   121 PresentEx
+//   122 GetGPUThreadPriority
+//   123 SetGPUThreadPriority
+//   124 WaitForVBlank
+//   125 CheckResourceResidency
+//   126 SetMaximumFrameLatency
+//   127 GetMaximumFrameLatency
+//   128 CheckDeviceState
+//   129 CreateRenderTargetEx
+//   130 CreateOffscreenPlainSurfaceEx
+//   131 CreateDepthStencilSurfaceEx
+//   132 ResetEx
+//   133 GetDisplayModeEx
+LPVOID lpvtbl_PresentEx_DX9(IDirect3DDevice9* pDX9DeviceEx)
+{
+    LPVOID* vtbl;
+    if (!pDX9DeviceEx)
+        return NULL;
+    vtbl = *(LPVOID**)pDX9DeviceEx;
+    return vtbl[121];
+}
+
+LPVOID lpvtbl_ResetEx(IDirect3DDevice9* pDX9DeviceEx)
+{
+    LPVOID* vtbl;
+    if (!pDX9DeviceEx)
+        return NULL;
+    vtbl = *(LPVOID**)pDX9DeviceEx;
+    return vtbl[132];
+}
+
 #undef CINTERFACE
