@@ -54,9 +54,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+// nvapi.lib (Win32) / nvapi64.lib (x64) selected in EnableWindowed3D.vcxproj
+// per-platform AdditionalDependencies. Not via #pragma comment(lib) because
+// the basename differs between the two architectures.
 #include "nvapi.h"
-
-#pragma comment(lib, "nvapi.lib")
 
 
 // DRS setting IDs. StereoProfile is documented in NVIDIA Profile
