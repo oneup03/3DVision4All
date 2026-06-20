@@ -46,9 +46,16 @@
 //
 // Usage: drop EnableWindowed3D.exe in the game's folder (next to the
 // game's main .exe), right-click -> Run as administrator. The tool
-// scans its own directory for *.exe files (excluding itself) and writes
-// StereoHiddenProfile=1 into each one's NV driver profile, creating a
-// user profile + application entry when NV's DB has none for that EXE.
+// prompts for a choice:
+//   1 -- enable:  scan its own directory for *.exe files (excluding
+//                 itself) and write StereoProfile=1 +
+//                 StereoHiddenProfile=1 into each one's NV driver
+//                 profile, creating a user profile + application entry
+//                 when NV's DB has none for that EXE.
+//   2 -- disable: scan the same directory and remove both settings from
+//                 each EXE's profile, reverting to NV's predefined
+//                 defaults.
+// Anything else exits without changes.
 
 #include <windows.h>
 #include <stdio.h>
@@ -78,11 +85,13 @@ static void CopyToNvApiString(NvAPI_UnicodeString dst, const wchar_t* src)
 }
 
 
-// Write StereoHiddenProfile=1 to the NV driver profile for exeBasename.
-// Returns true on success. The session must already be open and have had
-// LoadSettings called on it.
+// Write StereoHiddenProfile=1 to the NV driver profile for exeBasename
+// (enable=true) or remove both StereoProfile and StereoHiddenProfile from
+// the profile (enable=false). Returns true on success. The session must
+// already be open and have had LoadSettings called on it.
 static bool SetStereoHiddenProfileForExe(NvDRSSessionHandle hSession,
-                                         const wchar_t* exeBasename)
+                                         const wchar_t* exeBasename,
+                                         bool enable)
 {
     NvAPI_UnicodeString appNameU;
     CopyToNvApiString(appNameU, exeBasename);
@@ -92,6 +101,13 @@ static bool SetStereoHiddenProfileForExe(NvDRSSessionHandle hSession,
     app.version = NVDRS_APPLICATION_VER;
     NvAPI_Status st = NvAPI_DRS_FindApplicationByName(hSession, appNameU, &hProfile, &app);
     if (st != NVAPI_OK) {
+        if (!enable) {
+            // Nothing to clear -- the EXE has no profile in the first place,
+            // so windowed 3D is already off for it.
+            wprintf(L"  %s: not in any profile; nothing to disable\n", exeBasename);
+            return true;
+        }
+
         // No existing profile contains this EXE. Create a user profile
         // named after the EXE and add the EXE to it. The "3DVision4All - "
         // prefix avoids clashing with any predefined profile name in
@@ -143,6 +159,32 @@ static bool SetStereoHiddenProfileForExe(NvDRSSessionHandle hSession,
         } else {
             wprintf(L"  %s: found in existing profile\n", exeBasename);
         }
+    }
+
+    if (!enable) {
+        // Remove both settings from the profile so it reverts to NV's
+        // predefined defaults (or, for our own "3DVision4All - foo.exe"
+        // profile, to having no stereo overrides at all).
+        // NVAPI_SETTING_NOT_FOUND is benign -- the setting just wasn't
+        // there to begin with -- so treat it as success for each one.
+        NvAPI_Status sp = NvAPI_DRS_DeleteProfileSetting(hSession, hProfile,
+                                                        kStereoProfile_SettingID);
+        if (sp != NVAPI_OK && sp != NVAPI_SETTING_NOT_FOUND) {
+            wprintf(L"  %s: DeleteProfileSetting(StereoProfile) failed %d%s\n",
+                    exeBasename, sp,
+                    sp == NVAPI_ACCESS_DENIED ? L" (run as administrator)" : L"");
+            return false;
+        }
+        NvAPI_Status sh = NvAPI_DRS_DeleteProfileSetting(hSession, hProfile,
+                                                        kStereoHiddenProfile_SettingID);
+        if (sh != NVAPI_OK && sh != NVAPI_SETTING_NOT_FOUND) {
+            wprintf(L"  %s: DeleteProfileSetting(StereoHiddenProfile) failed %d%s\n",
+                    exeBasename, sh,
+                    sh == NVAPI_ACCESS_DENIED ? L" (run as administrator)" : L"");
+            return false;
+        }
+        wprintf(L"  %s: cleared StereoProfile + StereoHiddenProfile\n", exeBasename);
+        return true;
     }
 
     // StereoProfile MUST land first: its mere presence on the profile
@@ -199,7 +241,33 @@ int wmain(int argc, wchar_t* argv[])
     if (slash) *(slash + 1) = L'\0';
 
     wprintf(L"3DVision4All EnableWindowed3D\n");
-    wprintf(L"Scanning %s for game executables...\n\n", scanDir);
+    wprintf(L"\n");
+    wprintf(L"  1. Enable  windowed 3D for EXEs in this folder\n");
+    wprintf(L"  2. Disable windowed 3D for EXEs in this folder\n");
+    wprintf(L"  Any other key: exit\n");
+    wprintf(L"\nChoice: ");
+    fflush(stdout);
+
+    wint_t choice = getwchar();
+    // Drain to end-of-line so a stray Enter doesn't sit in stdin for the
+    // "Press Enter to exit..." prompt below.
+    if (choice != L'\n' && choice != WEOF) {
+        wint_t c;
+        while ((c = getwchar()) != L'\n' && c != WEOF) {}
+    }
+
+    bool enable;
+    if (choice == L'1') {
+        enable = true;
+    } else if (choice == L'2') {
+        enable = false;
+    } else {
+        wprintf(L"\nNo change requested. Exiting.\n");
+        return 0;
+    }
+
+    wprintf(L"\n%s windowed 3D for EXEs in %s ...\n\n",
+            enable ? L"Enabling" : L"Disabling", scanDir);
 
     NvAPI_Status st = NvAPI_Initialize();
     if (st != NVAPI_OK) {
@@ -249,7 +317,7 @@ int wmain(int argc, wchar_t* argv[])
         if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (_wcsicmp(findData.cFileName, selfBasename) == 0) continue;
 
-        if (SetStereoHiddenProfileForExe(hSession, findData.cFileName))
+        if (SetStereoHiddenProfileForExe(hSession, findData.cFileName, enable))
             touched++;
         else
             failed++;
