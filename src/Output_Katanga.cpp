@@ -23,68 +23,98 @@
 // and katanga/UnityNativePlugin/RenderAPI_D3D11.cpp:
 //
 //   1. Producer (us) creates a named MMF "Local\KatangaMappedFile"
-//      sized to sizeof(UINT) = 4 bytes (DeviarePlugin.cpp:121 — the
-//      game-side plugin owns the MMF). Both Katanga.exe's Unity plugin
-//      (UnityNativePlugin/RenderAPI_D3D11.cpp:486) and VRScreenCap's
-//      katanga_loader.rs:42 only OPEN it, so without the producer
-//      creating it the MMF never exists and the consumer's polling
-//      silently waits forever — manifesting as "VR viewer doesn't see
-//      our stereo image" with no obvious failure mode.
+//      sized to **8 bytes**. The original Katanga DeviarePlugin sized
+//      it at sizeof(UINT) = 4 (DeviarePlugin.cpp:121), and Katanga's
+//      own Unity plugin reads 4 bytes (UnityNativePlugin/RenderAPI_D3D11.cpp:482).
+//      But VRScreenCap reads it as a `usize` — 8 bytes on x64 —
+//      via `MapViewOfFile(.., size_of::<usize>())` in
+//      katanga_loader.rs:52. MapViewOfFile requires the requested
+//      size to be ≤ the CreateFileMapping size (MS docs: "All bytes
+//      must be within the maximum size specified by CreateFileMapping").
+//      A 4-byte mapping silently breaks VRScreenCap on import.
+//      Super-VRExport (Super-VRExport-Addon-main/VRExport/dllmain.cpp:412)
+//      caught the same issue and uses sizeof(uint64_t). We do the
+//      same: 8-byte MMF, write a uint64_t with the 32-bit handle in
+//      the low bits and zeros in the high bits. Katanga.exe still
+//      reads only the low 4 and is happy; VRScreenCap reads 8 and
+//      gets the handle value.
+//
+//      Neither Katanga.exe's Unity plugin (RenderAPI_D3D11.cpp:486)
+//      nor VRScreenCap's katanga_loader.rs:42 create the MMF — they
+//      only OPEN it. So without the producer creating it the MMF
+//      never exists and the consumer's polling silently waits
+//      forever.
 //   2. Consumer creates a named mutex "KatangaSetupMutex"
 //      (UnityNativePlugin/RenderAPI_D3D11.cpp:396). We use CreateMutexW
-//      with bInitialOwner=FALSE so the launch order doesn't matter —
-//      whoever runs first creates it, the other side attaches to the
-//      existing one. The mutex synchronizes the texture-recreate
-//      window (resolution change, format change); per-frame CopyResource
-//      runs unsynchronized.
+//      with bInitialOwner=FALSE so launch order doesn't matter —
+//      whoever runs first creates it, the other side attaches.
 //   3. Producer (us) creates an ID3D11Texture2D with
 //        Width  = 2 × game width   (full-SbS, eyes side-by-side)
 //        Height = game height
-//        Format = backbuffer format with sRGB stripped to linear
+//        Format = DXGI_FORMAT_B8G8R8A8_UNORM   ← FIXED, see below
 //        MiscFlags = D3D11_RESOURCE_MISC_SHARED
 //        BindFlags = SHADER_RESOURCE | RENDER_TARGET
 //   4. Producer calls IDXGIResource::GetSharedHandle to obtain the
-//      cross-process HANDLE, stores it as a 32-bit UINT into the MMF
-//      (the legacy KMT shared-handle space is 32-bit on every platform).
-//   5. Per frame, the producer copies the latest stereo image into the
-//      shared texture and Presents normally — no per-frame
-//      synchronization beyond the shared-handle write is required (the
-//      consumer polls the MMF for handle changes and just samples the
-//      texture; mid-frame tearing is tolerated by the VR consumer's
-//      reproject path).
-//   6. On any recreate (resolution change, format change, restart) the
-//      producer grabs KatangaSetupMutex, recreates the texture, writes
-//      the new handle into the MMF, and releases the mutex.
+//      cross-process HANDLE, stores it as a 32-bit UINT into the MMF.
+//   5. Per frame, the producer runs a fullscreen-triangle shader that
+//      reads the staging SRV (in whatever format the cross-API import
+//      landed on) and writes the half-swapped result into the shared
+//      texture. No per-frame mutex sync — the consumer tolerates
+//      mid-frame tearing via its reproject path.
+//   6. On any recreate (resolution change) the producer grabs
+//      KatangaSetupMutex, recreates the texture, writes the new handle
+//      into the MMF, and releases the mutex.
 //
-// Eye layout: per the user-confirmed design, we publish R-on-LEFT /
+// Why a shader instead of CopySubresourceRegion: VRScreenCap's
+// DXGI→wgpu format allowlist (VRScreenCap/src/conversions.rs:25-89)
+// rejects anything outside its hardcoded set with a hard `panic!` on
+// import. Critically that list does NOT include DXGI_FORMAT_B8G8R8X8_UNORM
+// — but D3DFMT_X8R8G8B8 (the common DX9 backbuffer-without-alpha
+// format) lands on B8G8R8X8_UNORM when opened cross-API on D3D11. If
+// we mirrored the staging format into the shared texture (the obvious
+// approach), every DX9 game with an X8R8G8B8 backbuffer would crash
+// VRScreenCap at import. CopyResource forbids format conversion across
+// typeless families (BGRA and BGRX are different families), so we
+// can't fix the format on the copy. Instead we sample the staging via
+// SRV — which decodes any source format to float4 — and write to a
+// fixed B8G8R8A8_UNORM RTV. As a bonus the same shader does the
+// R-on-LEFT half-swap, eliminating the two separate copy calls.
+//
+// Eye layout: per the user-confirmed design we publish R-on-LEFT /
 // L-on-RIGHT (the Katanga ecosystem convention) regardless of the
-// 3DVision4All `swap_eyes` knob. That matches Katanga.exe's Unity scene
-// and VRScreenCap's default (`swap_eyes = true` in config.rs:31). Our
-// own staging is L-on-LEFT after Hooks_DX9's capture-side fixup, so we
-// perform two CopySubresourceRegion calls to swap halves into the
-// shared texture. If a user wants natural-order output instead, they
-// can set --swap-eyes=false on vr-screen-cap (or the equivalent on
-// Katanga.exe) to undo our convention swap.
+// 3DVision4All `swap_eyes` knob. That matches Katanga.exe's Unity
+// scene (sbsShader.shader's `unity_StereoEyeIndex ? 0.0 : 0.5` offset)
+// and VRScreenCap's `swap_eyes = true` default in config.rs:31. Our
+// staging is L-on-LEFT after Hooks_DX9's capture-side fixup, so the PS
+// samples src.x = frac(uv.x + 0.5) to perform the swap. A user who
+// wants natural-order output sets --swap-eyes=false on vr-screen-cap.
 //
 // Connection lifecycle: the consumer can launch before or after the
 // game. We create the MMF + mutex on the first frame after entering
-// Katanga mode. Named-object semantics make launch order irrelevant —
-// CreateFileMappingW / CreateMutexW attach to the existing object if
-// the consumer was already running. Once attached we publish the
-// shared-texture handle into the MMF; the consumer's poll loop picks
-// it up and starts sampling. If the consumer dies mid-session we keep
-// publishing — relaunching the consumer alone is enough to reconnect,
-// since the MMF and texture handle are still live in our address
-// space.
+// Katanga mode. If the consumer dies mid-session we keep publishing —
+// relaunching the consumer alone is enough to reconnect.
 
 #include "Core.h"
 
+#include <stdint.h>
+
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <dxgi.h>
+#pragma comment(lib, "d3dcompiler.lib")
 
 
 static const wchar_t kKatangaMmfName[]   = L"Local\\KatangaMappedFile";
 static const wchar_t kKatangaMutexName[] = L"KatangaSetupMutex";
+
+// Output format published to the Katanga shared texture. Chosen to be
+// in every known consumer's allowlist: Katanga.exe's Unity scene
+// handles DXGI 87 (B8G8R8A8_UNORM, see LaunchAndPlay.cs:237) and
+// VRScreenCap's unmap_texture_format handles B8G8R8A8_UNORM →
+// wgpu::Bgra8Unorm (conversions.rs:53). BGRA8 also matches the BB
+// format we'd produce in the rest of the overlay pipeline so there's
+// no surprise to the user reading the log.
+static const DXGI_FORMAT kKatangaSharedFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
 
 
 // IPC state. Created on the first publish call (named-object semantics
@@ -96,46 +126,70 @@ static HANDLE s_kSetupMutex  = nullptr;
 static bool   s_kIpcReady    = false;
 
 // Shared texture on Device B. Recreated whenever the staging dims change.
-static ID3D11Texture2D* s_kSharedTex    = nullptr;
-static HANDLE           s_kSharedHandle = nullptr;
-static UINT             s_kTexWidth     = 0;
-static UINT             s_kTexHeight    = 0;
-static DXGI_FORMAT      s_kTexFormat    = DXGI_FORMAT_UNKNOWN;
+static ID3D11Texture2D*        s_kSharedTex    = nullptr;
+static ID3D11RenderTargetView* s_kSharedRTV    = nullptr;
+static HANDLE                  s_kSharedHandle = nullptr;
+static UINT                    s_kTexWidth     = 0;
+static UINT                    s_kTexHeight    = 0;
+
+// Shader pipeline state. Created lazily on the first publish call;
+// reused for the lifetime of Device B.
+static ID3D11VertexShader*    s_kVS      = nullptr;
+static ID3D11PixelShader*     s_kPS      = nullptr;
+static ID3D11SamplerState*    s_kSampler = nullptr;
+static ID3D11RasterizerState* s_kRS      = nullptr;
 
 
-// Strip sRGB → linear so a VR consumer doing its own tonemap doesn't
-// double up the gamma curve. Katanga's plugin does the same fixup at
-// InProc_DX11.cpp:183-186 for the same reason.
-static DXGI_FORMAT KatangaStripSrgb(DXGI_FORMAT f)
-{
-    switch (f) {
-        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8X8_UNORM;
-        default:                              return f;
-    }
-}
+// Fullscreen triangle generated from SV_VertexID — no VB / IA layout
+// needed, just Draw(3, 0) with TRIANGLELIST. Standard trick.
+static const char kHLSL_KatangaVS[] =
+    "void main(in uint vid : SV_VertexID,\n"
+    "          out float4 pos : SV_Position,\n"
+    "          out float2 uv  : TEXCOORD0)\n"
+    "{\n"
+    "    float2 ndc = float2((vid << 1) & 2, vid & 2);\n"
+    "    uv  = float2(ndc.x, 1.0 - ndc.y);\n"
+    "    pos = float4(ndc * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+// PS: sample the staging SRV, swapping halves on the way through. The
+// `frac(uv.x + 0.5)` wraparound is the half-swap; the source is
+// L-on-LEFT so output_x in [0, 0.5) should sample source_x in
+// [0.5, 1) (R image), and output_x in [0.5, 1) should sample source_x
+// in [0, 0.5) (L image). `frac(uv.x + 0.5)` does both in one
+// expression. Force alpha=1.0 because the source may be a BGRX
+// (alpha-less) format whose alpha bits are undefined.
+static const char kHLSL_KatangaPS[] =
+    "Texture2D    s0 : register(t0);\n"
+    "SamplerState ss : register(s0);\n"
+    "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
+    "{\n"
+    "    float2 src = float2(frac(uv.x + 0.5), uv.y);\n"
+    "    return float4(s0.Sample(ss, src).rgb, 1.0);\n"
+    "}\n";
 
 
 // Set up the producer side of the Katanga IPC. We own the MMF and
 // initialize its handle slot to 0 so an already-polling consumer sees
 // "not ready yet" instead of stale data. For the mutex, CreateMutexW
 // attaches to the consumer's existing object if it ran first, or
-// creates the kernel object ourselves if not — bInitialOwner=FALSE in
-// either case (we acquire it explicitly during recreate).
-//
-// Returns true once both objects are live. On any failure we tear
-// down whatever we partially created and return false; the caller can
-// retry next frame (cheap — failure here means a permissions issue or
-// out-of-memory, neither of which is going to fix itself, but at
-// least we won't crash).
+// creates the kernel object ourselves if not.
 static bool SetupKatangaIpc()
 {
+    // 8-byte mapping (see file-header comment for VRScreenCap vs
+    // Katanga.exe size mismatch). If a previous producer with a
+    // 4-byte mapping had created the named object, ours opens
+    // theirs and inherits the smaller size — but Super-VRExport's
+    // approach of recreating-on-each-publish would just bounce the
+    // name. Simpler: we own the size, MapViewOfFile-of-8 succeeds
+    // on a fresh 8-byte mapping, and the worst case (4-byte
+    // pre-existing object) only loses VRScreenCap compatibility,
+    // which was the pre-existing producer's bug, not ours.
     HANDLE mmf = CreateFileMappingW(
         INVALID_HANDLE_VALUE,   // backed by paging file
-        nullptr,                // default security
+        nullptr,
         PAGE_READWRITE,
-        0, sizeof(UINT),        // 4-byte object (the 32-bit shared handle)
+        0, sizeof(uint64_t),    // 8-byte object — see file-header note
         kKatangaMmfName);
     if (!mmf) {
         KLOG(L"Katanga: CreateFileMappingW failed err=0x%x\n", GetLastError());
@@ -143,16 +197,13 @@ static bool SetupKatangaIpc()
     }
     bool mmfPreExisted = (GetLastError() == ERROR_ALREADY_EXISTS);
 
-    LPVOID view = MapViewOfFile(mmf, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(UINT));
+    LPVOID view = MapViewOfFile(mmf, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(uint64_t));
     if (!view) {
         KLOG(L"Katanga: MapViewOfFile failed err=0x%x\n", GetLastError());
         CloseHandle(mmf);
         return false;
     }
-    // Reset the slot to 0 so the consumer's "handle changed" detector
-    // fires on our first real publish, even if a previous producer
-    // left a stale value in there.
-    *(PUINT)view = 0;
+    *(volatile uint64_t*)view = 0;
 
     HANDLE mutex = CreateMutexW(nullptr, FALSE /*bInitialOwner*/, kKatangaMutexName);
     if (!mutex) {
@@ -175,29 +226,116 @@ static bool SetupKatangaIpc()
 }
 
 
-// Tear down the shared texture and clear the published handle so a
-// reconnecting consumer doesn't read a stale value.
-static void ReleaseSharedTexture()
+// Lazy-compile the VS / PS / sampler / rasterizer state. Returns false
+// only on shader-compile failure, which shouldn't happen in practice.
+static bool EnsurePipeline(ID3D11Device* device)
 {
-    if (s_kSharedTex) { s_kSharedTex->Release(); s_kSharedTex = nullptr; }
-    s_kSharedHandle = nullptr;
-    s_kTexWidth = s_kTexHeight = 0;
-    s_kTexFormat = DXGI_FORMAT_UNKNOWN;
-    if (s_kMappedView) *(PUINT)s_kMappedView = 0;
+    if (s_kVS && s_kPS && s_kSampler && s_kRS) return true;
+
+    HRESULT hr;
+
+    if (!s_kVS) {
+        ID3DBlob* blob = nullptr;
+        ID3DBlob* errs = nullptr;
+        hr = D3DCompile(kHLSL_KatangaVS, sizeof(kHLSL_KatangaVS) - 1,
+                        "KatangaVS", nullptr, nullptr,
+                        "main", "vs_4_0", 0, 0, &blob, &errs);
+        if (FAILED(hr)) {
+            KLOG(L"Katanga: VS compile failed hr=0x%x errs=%S\n",
+                 hr, errs ? (const char*)errs->GetBufferPointer() : "(none)");
+            if (errs) errs->Release();
+            return false;
+        }
+        if (errs) errs->Release();
+        hr = device->CreateVertexShader(blob->GetBufferPointer(),
+                                        blob->GetBufferSize(),
+                                        nullptr, &s_kVS);
+        blob->Release();
+        if (FAILED(hr) || !s_kVS) {
+            KLOG(L"Katanga: CreateVertexShader hr=0x%x\n", hr);
+            s_kVS = nullptr;
+            return false;
+        }
+    }
+
+    if (!s_kPS) {
+        ID3DBlob* blob = nullptr;
+        ID3DBlob* errs = nullptr;
+        hr = D3DCompile(kHLSL_KatangaPS, sizeof(kHLSL_KatangaPS) - 1,
+                        "KatangaPS", nullptr, nullptr,
+                        "main", "ps_4_0", 0, 0, &blob, &errs);
+        if (FAILED(hr)) {
+            KLOG(L"Katanga: PS compile failed hr=0x%x errs=%S\n",
+                 hr, errs ? (const char*)errs->GetBufferPointer() : "(none)");
+            if (errs) errs->Release();
+            return false;
+        }
+        if (errs) errs->Release();
+        hr = device->CreatePixelShader(blob->GetBufferPointer(),
+                                       blob->GetBufferSize(),
+                                       nullptr, &s_kPS);
+        blob->Release();
+        if (FAILED(hr) || !s_kPS) {
+            KLOG(L"Katanga: CreatePixelShader hr=0x%x\n", hr);
+            s_kPS = nullptr;
+            return false;
+        }
+    }
+
+    if (!s_kSampler) {
+        D3D11_SAMPLER_DESC sd = {};
+        sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.MaxLOD   = D3D11_FLOAT32_MAX;
+        hr = device->CreateSamplerState(&sd, &s_kSampler);
+        if (FAILED(hr) || !s_kSampler) {
+            KLOG(L"Katanga: CreateSamplerState hr=0x%x\n", hr);
+            s_kSampler = nullptr;
+            return false;
+        }
+    }
+
+    if (!s_kRS) {
+        // CULL_NONE — the fullscreen triangle is CCW in render-target
+        // Y-down space, the default CULL_BACK would discard it.
+        D3D11_RASTERIZER_DESC rd = {};
+        rd.FillMode              = D3D11_FILL_SOLID;
+        rd.CullMode              = D3D11_CULL_NONE;
+        rd.FrontCounterClockwise = FALSE;
+        rd.DepthClipEnable       = TRUE;
+        hr = device->CreateRasterizerState(&rd, &s_kRS);
+        if (FAILED(hr) || !s_kRS) {
+            KLOG(L"Katanga: CreateRasterizerState hr=0x%x\n", hr);
+            s_kRS = nullptr;
+            return false;
+        }
+    }
+
+    return true;
 }
 
 
-// (Re)create the shared texture and publish its handle. Called whenever
-// the staging dims/format change. Runs under KatangaSetupMutex so the
-// consumer's draw thread can't sample the texture mid-recreate.
-//
-// Returns true on success. On any failure the existing shared texture is
-// torn down (and the MMF handle cleared) so we don't leave the consumer
-// pointing at a dangling object.
+// Tear down the shared texture, RTV, and the published handle so a
+// reconnecting consumer doesn't read a stale value.
+static void ReleaseSharedTexture()
+{
+    if (s_kSharedRTV) { s_kSharedRTV->Release(); s_kSharedRTV = nullptr; }
+    if (s_kSharedTex) { s_kSharedTex->Release(); s_kSharedTex = nullptr; }
+    s_kSharedHandle = nullptr;
+    s_kTexWidth = s_kTexHeight = 0;
+    if (s_kMappedView) *(volatile uint64_t*)s_kMappedView = 0;
+}
+
+
+// (Re)create the shared texture at fixed B8G8R8A8_UNORM and publish
+// its handle. Called on first publish and whenever the staging dims
+// change. Runs under KatangaSetupMutex so the consumer can't sample
+// mid-recreate.
 static bool RecreateSharedTexture(ID3D11Device* device,
                                   UINT          width,
-                                  UINT          height,
-                                  DXGI_FORMAT   fmt)
+                                  UINT          height)
 {
     DWORD waitRes = WaitForSingleObject(s_kSetupMutex, 1000);
     if (waitRes != WAIT_OBJECT_0) {
@@ -206,17 +344,14 @@ static bool RecreateSharedTexture(ID3D11Device* device,
         return false;
     }
 
-    bool ok = false;
     ReleaseSharedTexture();
-
-    DXGI_FORMAT useFmt = KatangaStripSrgb(fmt);
 
     D3D11_TEXTURE2D_DESC td = {};
     td.Width            = width;
     td.Height           = height;
     td.MipLevels        = 1;
     td.ArraySize        = 1;
-    td.Format           = useFmt;
+    td.Format           = kKatangaSharedFormat;
     td.SampleDesc.Count = 1;
     td.Usage            = D3D11_USAGE_DEFAULT;
     td.BindFlags        = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -225,8 +360,16 @@ static bool RecreateSharedTexture(ID3D11Device* device,
     HRESULT hr = device->CreateTexture2D(&td, nullptr, &s_kSharedTex);
     if (FAILED(hr) || !s_kSharedTex) {
         KLOG(L"Katanga: CreateTexture2D failed hr=0x%x %ux%u fmt=%d\n",
-             hr, width, height, (int)useFmt);
+             hr, width, height, (int)kKatangaSharedFormat);
         s_kSharedTex = nullptr;
+        ReleaseMutex(s_kSetupMutex);
+        return false;
+    }
+
+    hr = device->CreateRenderTargetView(s_kSharedTex, nullptr, &s_kSharedRTV);
+    if (FAILED(hr) || !s_kSharedRTV) {
+        KLOG(L"Katanga: CreateRenderTargetView hr=0x%x\n", hr);
+        ReleaseSharedTexture();
         ReleaseMutex(s_kSetupMutex);
         return false;
     }
@@ -248,75 +391,80 @@ static bool RecreateSharedTexture(ID3D11Device* device,
         return false;
     }
 
-    // Stamp the 32-bit shared-handle value into the MMF. Per the
-    // Katanga protocol comment in InProc_DX11.cpp:213-217 the legacy
-    // KMT shared-handle namespace is 32-bit on every platform, so a
-    // PtrToUint is loss-free even in a 64-bit producer process.
-    *(PUINT)s_kMappedView = PtrToUint(s_kSharedHandle);
+    // Stamp the shared handle into the 8-byte MMF slot. The KMT
+    // handle namespace is 32-bit on every platform (Katanga's
+    // InProc_DX11.cpp:213-217 comment), so the high 32 bits stay
+    // zero. A 64-bit-reading consumer (VRScreenCap, usize) gets
+    // exactly the 32-bit handle value; a 32-bit-reading consumer
+    // (Katanga.exe, UINT) gets the low 4 bytes which IS the handle.
+    *(volatile uint64_t*)s_kMappedView =
+        (uint64_t)(uintptr_t)s_kSharedHandle;
 
     s_kTexWidth  = width;
     s_kTexHeight = height;
-    s_kTexFormat = useFmt;
-    ok = true;
-    KLOG(L"Katanga: shared texture published %ux%u fmt=%d handle=%p (32b=0x%x)\n",
-         width, height, (int)useFmt, s_kSharedHandle, PtrToUint(s_kSharedHandle));
+    KLOG(L"Katanga: shared texture published %ux%u fmt=BGRA8 handle=%p (32b=0x%x)\n",
+         width, height, s_kSharedHandle, PtrToUint(s_kSharedHandle));
 
     ReleaseMutex(s_kSetupMutex);
-    return ok;
+    return true;
 }
 
 
 // --------------------------------------------------------------------------
 // Public entry points.
 
-void Katanga_PublishFrame(ID3D11Device*        device,
-                          ID3D11DeviceContext* ctx,
-                          ID3D11Texture2D*     stagingTex,
-                          UINT                 stagingWidth,
-                          UINT                 stagingHeight)
+void Katanga_PublishFrame(ID3D11Device*              device,
+                          ID3D11DeviceContext*       ctx,
+                          ID3D11ShaderResourceView*  stagingSRV,
+                          UINT                       stagingWidth,
+                          UINT                       stagingHeight)
 {
-    if (!device || !ctx || !stagingTex || stagingWidth == 0 || stagingHeight == 0)
+    if (!device || !ctx || !stagingSRV || stagingWidth == 0 || stagingHeight == 0)
         return;
 
-    // One-time IPC setup. We own both the MMF and (effectively) the
-    // mutex via CreateMutexW's named-object attach semantics, so this
-    // succeeds on the first call regardless of whether the consumer is
-    // already running. Subsequent frames are a cheap predictable
-    // branch.
     if (!s_kIpcReady && !SetupKatangaIpc())
         return;
-
-    // Match the staging texture's actual format so CopySubresourceRegion
-    // has no implicit conversion path (D3D11 requires bit-compatible
-    // formats for resource copies). Strip sRGB on the way through for
-    // the same gamma reason Katanga's own plugin does.
-    D3D11_TEXTURE2D_DESC srcDesc = {};
-    stagingTex->GetDesc(&srcDesc);
-    DXGI_FORMAT wantFmt = KatangaStripSrgb(srcDesc.Format);
-
-    if (!s_kSharedTex ||
-        s_kTexWidth  != stagingWidth ||
-        s_kTexHeight != stagingHeight ||
-        s_kTexFormat != wantFmt) {
-        if (!RecreateSharedTexture(device, stagingWidth, stagingHeight, srcDesc.Format))
+    if (!EnsurePipeline(device))
+        return;
+    if (!s_kSharedTex || s_kTexWidth != stagingWidth || s_kTexHeight != stagingHeight) {
+        if (!RecreateSharedTexture(device, stagingWidth, stagingHeight))
             return;
     }
 
-    // Half-swap copy. Staging holds L-on-LEFT (Hooks_DX9 already undid
-    // the reverse-blit's right-on-left layout), but the Katanga
-    // ecosystem expects R-on-LEFT / L-on-RIGHT, so put the staging's
-    // right half into the shared texture's left half and vice versa.
-    // Same shape as katanga/DeviarePlugin/InProc_DX11.cpp:296-300's
-    // direct-mode path.
-    UINT halfW = stagingWidth / 2;
+    // Single fullscreen-triangle pass: staging SRV → shared RTV with
+    // half-swap and fixed BGRA8 output. We save no state — the
+    // overlay's present loop will re-bind whatever it needs next
+    // frame for its compose pass and Present.
+    D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)stagingWidth, (float)stagingHeight, 0.0f, 1.0f };
+    ctx->OMSetRenderTargets(1, &s_kSharedRTV, nullptr);
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(s_kRS);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetInputLayout(nullptr);
+    ctx->VSSetShader(s_kVS, nullptr, 0);
+    ctx->PSSetShader(s_kPS, nullptr, 0);
+    ctx->PSSetShaderResources(0, 1, &stagingSRV);
+    ctx->PSSetSamplers(0, 1, &s_kSampler);
+    ctx->Draw(3, 0);
 
-    D3D11_BOX leftHalf  = { 0,     0, 0, halfW,         stagingHeight, 1 };
-    D3D11_BOX rightHalf = { halfW, 0, 0, stagingWidth,  stagingHeight, 1 };
+    // Unbind the staging SRV so the next Compose pass on Device B can
+    // bind the same texture as something else (the overlay's compose
+    // also samples staging — same SRV in the typical case, but worth
+    // being tidy).
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    ctx->PSSetShaderResources(0, 1, &nullSRV);
 
-    // Staging's R half → shared's left half  (R-on-LEFT)
-    ctx->CopySubresourceRegion(s_kSharedTex, 0, 0,     0, 0, stagingTex, 0, &rightHalf);
-    // Staging's L half → shared's right half (L-on-RIGHT)
-    ctx->CopySubresourceRegion(s_kSharedTex, 0, halfW, 0, 0, stagingTex, 0, &leftHalf);
+    // Flush the immediate context. In the windowed output modes the
+    // overlay's swap-chain Present implicitly flushes after the
+    // compose pass, so the draw above lands on the GPU within the
+    // frame. In Katanga headless mode there is no Present — without
+    // this explicit flush the publish draws sit in the command queue
+    // until the driver decides to flush on its own (cmd buffer full,
+    // GPU idle timeout), which manifests to VR consumers as
+    // "occasional single frame, then nothing" because they read
+    // whatever the cross-process shared texture happens to contain
+    // each poll and that only updates when the driver flushes.
+    ctx->Flush();
 }
 
 
@@ -336,8 +484,13 @@ void Katanga_Shutdown()
         ReleaseSharedTexture();
     }
 
-    if (s_kSetupMutex) { CloseHandle(s_kSetupMutex);   s_kSetupMutex = nullptr; }
+    if (s_kRS)      { s_kRS->Release();      s_kRS      = nullptr; }
+    if (s_kSampler) { s_kSampler->Release(); s_kSampler = nullptr; }
+    if (s_kPS)      { s_kPS->Release();      s_kPS      = nullptr; }
+    if (s_kVS)      { s_kVS->Release();      s_kVS      = nullptr; }
+
+    if (s_kSetupMutex) { CloseHandle(s_kSetupMutex);     s_kSetupMutex = nullptr; }
     if (s_kMappedView) { UnmapViewOfFile(s_kMappedView); s_kMappedView = nullptr; }
-    if (s_kMappedFile) { CloseHandle(s_kMappedFile);   s_kMappedFile = nullptr; }
+    if (s_kMappedFile) { CloseHandle(s_kMappedFile);     s_kMappedFile = nullptr; }
     s_kIpcReady = false;
 }

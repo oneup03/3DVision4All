@@ -212,6 +212,30 @@ static HWND CreateOverlayWindow(HMODULE hSelf, HWND gameHwnd)
 // --------------------------------------------------------------------------
 // D3D11 Device B + swap chain.
 
+// Bare D3D11 device + immediate context, no window / no swap chain.
+// Used in Katanga mode where the only output path is the cross-process
+// shared texture handed to a VR viewer — no on-screen overlay needed.
+// The device is still required (to open the cross-API staging SRV and
+// run the Katanga publish shader).
+static bool CreateDeviceB_Headless()
+{
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    D3D_FEATURE_LEVEL fl  = D3D_FEATURE_LEVEL_11_0;
+    D3D_FEATURE_LEVEL got = D3D_FEATURE_LEVEL_9_1;
+    HRESULT hr = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+        &fl, 1, D3D11_SDK_VERSION,
+        &s_deviceB, &got, &s_contextB);
+    if (FAILED(hr) || !s_deviceB) {
+        KLOG(L"Output_Overlay: D3D11CreateDevice (headless) failed hr=0x%x\n", hr);
+        return false;
+    }
+    KLOG(L"Output_Overlay: Device B headless (D3D11 fl=0x%x) for Katanga publish\n",
+         (unsigned)got);
+    return true;
+}
+
+
 static bool CreateDeviceB(HWND overlayHwnd, UINT width, UINT height)
 {
     HRESULT hr;
@@ -508,37 +532,63 @@ static void ReleaseDeviceB()
 
 
 // --------------------------------------------------------------------------
-// Present thread. Owns the window AND the device — the same thread that
-// owns the HWND must pump its messages and is the one whose SetWindowPos
-// calls don't get deferred via cross-thread SendMessage.
+// Present thread. Two flavours:
+//
+//   Windowed modes (Sbs / Tab / interlaced / Checkerboard / LeiaSR):
+//     Owns the click-through topmost overlay window AND the device. The
+//     same thread that owns the HWND must pump its messages and is the
+//     one whose SetWindowPos calls don't get deferred via cross-thread
+//     SendMessage. The per-frame loop composes the stereo image into the
+//     swap-chain backbuffer and Presents.
+//
+//   Katanga mode:
+//     Headless. No HWND, no swap chain, no compose pass, no Present.
+//     The only output is the cross-process shared texture handed to a VR
+//     viewer (Katanga.exe / VRScreenCap / Osiris) over the Katanga IPC.
+//     Drawing anything to the desktop here would just be wasted GPU
+//     work that the user can't see anyway (they're in a headset). All
+//     the window-management code (foreground gate, cursor confine/hide,
+//     HWND_TOPMOST re-assert) is skipped — none of those make sense
+//     without a window, and forcing topmost would actively interfere
+//     with the user's VR-viewer GUI / OBS / control panels.
 
 static unsigned __stdcall PresentThreadProc(void* /*param*/)
 {
-    KLOG(L"Output_Overlay: present thread started (D3D11)\n");
+    const bool katangaMode = (g_config.mode == StereoMode::Katanga);
+    KLOG(L"Output_Overlay: present thread started (D3D11, %s)\n",
+         katangaMode ? L"Katanga headless" : L"windowed overlay");
 
-    HMODULE hSelf = GetModuleHandleW(nullptr);
-    s_overlayHwnd = CreateOverlayWindow(hSelf, s_gameHwnd);
-    if (!s_overlayHwnd) {
-        InterlockedExchange(&s_startOnce, 0);
-        return 1;
-    }
-
-    RECT cr;
-    GetClientRect(s_overlayHwnd, &cr);
-    UINT bbW = (UINT)(cr.right - cr.left);
-    UINT bbH = (UINT)(cr.bottom - cr.top);
-    if (bbW == 0 || bbH == 0) { bbW = g_stagingWidth / 2; bbH = g_stagingHeight; }
-    if (!CreateDeviceB(s_overlayHwnd, bbW, bbH)) {
-        DestroyWindow(s_overlayHwnd); s_overlayHwnd = nullptr;
-        InterlockedExchange(&s_startOnce, 0);
-        return 1;
+    if (katangaMode) {
+        if (!CreateDeviceB_Headless()) {
+            InterlockedExchange(&s_startOnce, 0);
+            return 1;
+        }
+    } else {
+        HMODULE hSelf = GetModuleHandleW(nullptr);
+        s_overlayHwnd = CreateOverlayWindow(hSelf, s_gameHwnd);
+        if (!s_overlayHwnd) {
+            InterlockedExchange(&s_startOnce, 0);
+            return 1;
+        }
+        RECT cr;
+        GetClientRect(s_overlayHwnd, &cr);
+        UINT bbW = (UINT)(cr.right - cr.left);
+        UINT bbH = (UINT)(cr.bottom - cr.top);
+        if (bbW == 0 || bbH == 0) { bbW = g_stagingWidth / 2; bbH = g_stagingHeight; }
+        if (!CreateDeviceB(s_overlayHwnd, bbW, bbH)) {
+            DestroyWindow(s_overlayHwnd); s_overlayHwnd = nullptr;
+            InterlockedExchange(&s_startOnce, 0);
+            return 1;
+        }
     }
 
     while (!s_shutdown) {
-        MSG msg;
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        if (!katangaMode) {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
 
         DWORD wait = WaitForSingleObject(s_frameEvent, 16);
@@ -547,7 +597,51 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
         if (wait != WAIT_OBJECT_0) break;
         ResetEvent(s_frameEvent);
 
-        if (!s_swapChain || !s_contextB) continue;
+        if (!s_contextB) continue;
+
+        // Katanga headless path: cursor management still applies (the
+        // user is playing on the desktop monitor + VR headset, so
+        // they still want ClipCursor / hide_cursor on the game
+        // window). Then open staging, publish, loop. No swap chain,
+        // no compose pass, no Present, no overlay window — those
+        // would just be wasted GPU work for output the user is
+        // watching in VR instead.
+        if (katangaMode) {
+            if (g_config.confine_cursor || g_config.hide_cursor) {
+                static bool s_kCursorClipped = false;
+                HWND fg = GetForegroundWindow();
+                DWORD fgPid = 0;
+                if (fg) GetWindowThreadProcessId(fg, &fgPid);
+                bool gameFg = (fgPid == GetCurrentProcessId());
+                if (g_config.confine_cursor) {
+                    if (gameFg && s_gameHwnd) {
+                        RECT r = {};
+                        if (GetWindowRect(s_gameHwnd, &r))
+                            ClipCursor(&r);
+                        s_kCursorClipped = true;
+                    } else if (s_kCursorClipped) {
+                        ClipCursor(nullptr);
+                        s_kCursorClipped = false;
+                    }
+                }
+                // Belt-and-suspenders over the Hooks_DX9 WndProc
+                // subclass + class-cursor swap, for the same reason
+                // as in the windowed path: some games have a busy UI
+                // thread whose WM_SETCURSOR doesn't fire promptly,
+                // and SetCursor from this responsive thread updates
+                // the global cursor shape directly.
+                if (gameFg && g_config.hide_cursor)
+                    SetCursor(nullptr);
+            }
+
+            if (!EnsureStagingOnB()) continue;
+            UpdateStagingFromCpuBufferIfFresh();
+            Katanga_PublishFrame(s_deviceB, s_contextB, s_sharedSRV,
+                                 g_stagingWidth, g_stagingHeight);
+            continue;
+        }
+
+        if (!s_swapChain) continue;
 
         // Hide the overlay when the game isn't the foreground process so
         // alt-tabbed-to-other-apps don't sit behind a topmost stereo
@@ -629,23 +723,8 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
             }
         }
         if (!didWeave) {
-            // Katanga mode renders an SbS preview into the overlay BB
-            // so the user can confirm capture is alive even before the
-            // VR consumer attaches. The Compose pass is mode-agnostic
-            // for any value that has no dedicated shader (the
-            // HlslForMode default returns Sbs), so passing Katanga
-            // here is fine. The actual cross-process hand-off happens
-            // immediately after the compose.
-            StereoMode composeMode = (g_config.mode == StereoMode::Katanga)
-                                         ? StereoMode::Sbs
-                                         : g_config.mode;
             Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_backBufRTV,
-                              s_bbWidth, s_bbHeight, composeMode);
-
-            if (g_config.mode == StereoMode::Katanga) {
-                Katanga_PublishFrame(s_deviceB, s_contextB, s_sharedTex,
-                                     g_stagingWidth, g_stagingHeight);
-            }
+                              s_bbWidth, s_bbHeight, g_config.mode);
         }
 
         HRESULT pr = s_swapChain->Present(1, 0);

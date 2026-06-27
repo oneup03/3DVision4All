@@ -342,13 +342,22 @@ void LeiaSR_Shutdown();
 // named MMF "Local\KatangaMappedFile" carries a 32-bit DXGI shared handle,
 // and named mutex "KatangaSetupMutex" gates the recreate window. Called
 // from the overlay present thread once per frame when the mode is
-// StereoMode::Katanga. No-op (with periodic re-open attempts) until a VR
-// consumer is detected.
-void Katanga_PublishFrame(ID3D11Device*        device,
-                          ID3D11DeviceContext* ctx,
-                          ID3D11Texture2D*     stagingTex,
-                          UINT                 stagingWidth,
-                          UINT                 stagingHeight);
+// StereoMode::Katanga.
+//
+// Takes the staging SRV (whose format may be anything the cross-API
+// import landed on — BGRA8, BGRX8, R10G10B10A2, etc.) and runs a single
+// fullscreen-triangle shader pass into a Katanga shared texture whose
+// format is FIXED at DXGI_FORMAT_B8G8R8A8_UNORM. The shader also swaps
+// halves so the published layout is R-on-LEFT (Katanga convention).
+// The fixed output format is important because VRScreenCap's
+// DXGI→wgpu format allowlist (see VRScreenCap/src/conversions.rs)
+// rejects BGRX8 with a hard panic — and BGRX8 is the cross-API
+// equivalent of D3DFMT_X8R8G8B8, a very common DX9 backbuffer format.
+void Katanga_PublishFrame(ID3D11Device*              device,
+                          ID3D11DeviceContext*       ctx,
+                          ID3D11ShaderResourceView*  stagingSRV,
+                          UINT                       stagingWidth,
+                          UINT                       stagingHeight);
 void Katanga_Shutdown();
 
 
