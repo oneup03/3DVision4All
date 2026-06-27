@@ -19,15 +19,24 @@
 //
 // Mirrors the producer side of the Katanga protocol used by Katanga.exe
 // (Unity VR viewer) and VRScreenCap (Rust/OpenXR viewer). The protocol
-// is reverse-engineered from katanga/DeviarePlugin/InProc_DX11.cpp and
-// VRScreenCap-main/src/loaders/katanga_loader.rs:
+// is reverse-engineered from katanga/DeviarePlugin/{DeviarePlugin,InProc_DX11}.cpp
+// and katanga/UnityNativePlugin/RenderAPI_D3D11.cpp:
 //
-//   1. Consumer creates a named MMF "Local\KatangaMappedFile" sized to
-//      sizeof(UINT) = 4 bytes.
-//   2. Consumer creates a named mutex "KatangaSetupMutex" — it owns the
-//      mutex initially (CreateMutex with bInitialOwner=TRUE) so the
-//      producer must wait before publishing the first handle, ensuring
-//      the consumer is ready.
+//   1. Producer (us) creates a named MMF "Local\KatangaMappedFile"
+//      sized to sizeof(UINT) = 4 bytes (DeviarePlugin.cpp:121 — the
+//      game-side plugin owns the MMF). Both Katanga.exe's Unity plugin
+//      (UnityNativePlugin/RenderAPI_D3D11.cpp:486) and VRScreenCap's
+//      katanga_loader.rs:42 only OPEN it, so without the producer
+//      creating it the MMF never exists and the consumer's polling
+//      silently waits forever — manifesting as "VR viewer doesn't see
+//      our stereo image" with no obvious failure mode.
+//   2. Consumer creates a named mutex "KatangaSetupMutex"
+//      (UnityNativePlugin/RenderAPI_D3D11.cpp:396). We use CreateMutexW
+//      with bInitialOwner=FALSE so the launch order doesn't matter —
+//      whoever runs first creates it, the other side attaches to the
+//      existing one. The mutex synchronizes the texture-recreate
+//      window (resolution change, format change); per-frame CopyResource
+//      runs unsynchronized.
 //   3. Producer (us) creates an ID3D11Texture2D with
 //        Width  = 2 × game width   (full-SbS, eyes side-by-side)
 //        Height = game height
@@ -58,12 +67,15 @@
 // Katanga.exe) to undo our convention swap.
 //
 // Connection lifecycle: the consumer can launch before or after the
-// game. We poll OpenFileMapping/OpenMutex lazily each frame (cheap
-// kernel calls, ~µs); first success caches the handles for the
-// remainder of the session. If the consumer dies mid-session we keep
-// publishing into the dangling shared texture and the user will need
-// to relaunch us along with the consumer — matching Katanga's own
-// behaviour.
+// game. We create the MMF + mutex on the first frame after entering
+// Katanga mode. Named-object semantics make launch order irrelevant —
+// CreateFileMappingW / CreateMutexW attach to the existing object if
+// the consumer was already running. Once attached we publish the
+// shared-texture handle into the MMF; the consumer's poll loop picks
+// it up and starts sampling. If the consumer dies mid-session we keep
+// publishing — relaunching the consumer alone is enough to reconnect,
+// since the MMF and texture handle are still live in our address
+// space.
 
 #include "Core.h"
 
@@ -75,18 +87,13 @@ static const wchar_t kKatangaMmfName[]   = L"Local\\KatangaMappedFile";
 static const wchar_t kKatangaMutexName[] = L"KatangaSetupMutex";
 
 
-// IPC state. Opened lazily on the first publish call where a consumer is
-// found; kept open for the remainder of the session.
+// IPC state. Created on the first publish call (named-object semantics
+// attach to an already-running consumer's mutex if one exists, or
+// create fresh objects if not), then kept open for the session.
 static HANDLE s_kMappedFile  = nullptr;
 static LPVOID s_kMappedView  = nullptr;
 static HANDLE s_kSetupMutex  = nullptr;
 static bool   s_kIpcReady    = false;
-
-// Cadence for re-poll attempts when no consumer has appeared yet. The
-// frame loop calls Katanga_PublishFrame every frame; doing OpenFileMappingW
-// 60×/s for the entire session adds up. Once attached we stop polling.
-static UINT  s_kPollCounter = 0;
-static const UINT kPollIntervalFrames = 60;  // ≈ once per second at 60 Hz
 
 // Shared texture on Device B. Recreated whenever the staging dims change.
 static ID3D11Texture2D* s_kSharedTex    = nullptr;
@@ -110,16 +117,31 @@ static DXGI_FORMAT KatangaStripSrgb(DXGI_FORMAT f)
 }
 
 
-// Look up the existing IPC objects. Caller already verified s_kIpcReady
-// is false. Returns true if both MMF and mutex were found.
-static bool TryOpenKatangaIpc()
+// Set up the producer side of the Katanga IPC. We own the MMF and
+// initialize its handle slot to 0 so an already-polling consumer sees
+// "not ready yet" instead of stale data. For the mutex, CreateMutexW
+// attaches to the consumer's existing object if it ran first, or
+// creates the kernel object ourselves if not — bInitialOwner=FALSE in
+// either case (we acquire it explicitly during recreate).
+//
+// Returns true once both objects are live. On any failure we tear
+// down whatever we partially created and return false; the caller can
+// retry next frame (cheap — failure here means a permissions issue or
+// out-of-memory, neither of which is going to fix itself, but at
+// least we won't crash).
+static bool SetupKatangaIpc()
 {
-    HANDLE mmf = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, kKatangaMmfName);
+    HANDLE mmf = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,   // backed by paging file
+        nullptr,                // default security
+        PAGE_READWRITE,
+        0, sizeof(UINT),        // 4-byte object (the 32-bit shared handle)
+        kKatangaMmfName);
     if (!mmf) {
-        // Most common path while waiting for the consumer to launch —
-        // ERROR_FILE_NOT_FOUND. Don't spam the log with it.
+        KLOG(L"Katanga: CreateFileMappingW failed err=0x%x\n", GetLastError());
         return false;
     }
+    bool mmfPreExisted = (GetLastError() == ERROR_ALREADY_EXISTS);
 
     LPVOID view = MapViewOfFile(mmf, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(UINT));
     if (!view) {
@@ -127,21 +149,28 @@ static bool TryOpenKatangaIpc()
         CloseHandle(mmf);
         return false;
     }
+    // Reset the slot to 0 so the consumer's "handle changed" detector
+    // fires on our first real publish, even if a previous producer
+    // left a stale value in there.
+    *(PUINT)view = 0;
 
-    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, kKatangaMutexName);
+    HANDLE mutex = CreateMutexW(nullptr, FALSE /*bInitialOwner*/, kKatangaMutexName);
     if (!mutex) {
-        KLOG(L"Katanga: MMF found but KatangaSetupMutex missing err=0x%x\n",
-             GetLastError());
+        KLOG(L"Katanga: CreateMutexW failed err=0x%x\n", GetLastError());
         UnmapViewOfFile(view);
         CloseHandle(mmf);
         return false;
     }
+    bool mutexPreExisted = (GetLastError() == ERROR_ALREADY_EXISTS);
 
     s_kMappedFile = mmf;
     s_kMappedView = view;
     s_kSetupMutex = mutex;
     s_kIpcReady   = true;
-    KLOG(L"Katanga: IPC attached (mmf=%p mutex=%p view=%p)\n", mmf, mutex, view);
+    KLOG(L"Katanga: IPC ready (mmf=%p%s mutex=%p%s view=%p)\n",
+         mmf, mmfPreExisted ? L" pre-existing" : L" created",
+         mutex, mutexPreExisted ? L" pre-existing" : L" created",
+         view);
     return true;
 }
 
@@ -249,14 +278,13 @@ void Katanga_PublishFrame(ID3D11Device*        device,
     if (!device || !ctx || !stagingTex || stagingWidth == 0 || stagingHeight == 0)
         return;
 
-    // Lazy IPC open. Cheap per-frame skip once attached; throttled to
-    // ~1 Hz while waiting for the consumer to appear (OpenFileMappingW
-    // is a syscall, no need to do it every frame).
-    if (!s_kIpcReady) {
-        if (s_kPollCounter++ < kPollIntervalFrames) return;
-        s_kPollCounter = 0;
-        if (!TryOpenKatangaIpc()) return;
-    }
+    // One-time IPC setup. We own both the MMF and (effectively) the
+    // mutex via CreateMutexW's named-object attach semantics, so this
+    // succeeds on the first call regardless of whether the consumer is
+    // already running. Subsequent frames are a cheap predictable
+    // branch.
+    if (!s_kIpcReady && !SetupKatangaIpc())
+        return;
 
     // Match the staging texture's actual format so CopySubresourceRegion
     // has no implicit conversion path (D3D11 requires bit-compatible
@@ -311,6 +339,5 @@ void Katanga_Shutdown()
     if (s_kSetupMutex) { CloseHandle(s_kSetupMutex);   s_kSetupMutex = nullptr; }
     if (s_kMappedView) { UnmapViewOfFile(s_kMappedView); s_kMappedView = nullptr; }
     if (s_kMappedFile) { CloseHandle(s_kMappedFile);   s_kMappedFile = nullptr; }
-    s_kIpcReady    = false;
-    s_kPollCounter = 0;
+    s_kIpcReady = false;
 }
