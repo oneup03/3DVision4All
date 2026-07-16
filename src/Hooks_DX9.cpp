@@ -897,10 +897,54 @@ static void PreFramePresentCapture(IDirect3DDevice9* device)
                 // StretchRect, then we copy to the shared texture for
                 // Device B. Both StretchRects happen while ReverseStereo-
                 // BlitControl is TRUE.
-                NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, true);
-                device->StretchRect(backBuffer, nullptr, g_stereoStage, nullptr, D3DTEXF_NONE);
-                PublishStereoFrame(device);
-                NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, false);
+                //
+                // ...but only while 3D Vision is actually active. When the
+                // driver drops stereo mid-session (the user presses Ctrl+T,
+                // the display mode stops supporting it, or the game's NV
+                // profile disables it), the backbuffer goes genuinely mono.
+                // The reverse-stereo-blit then degrades to STRETCHING that
+                // single image across the full 2W staging, so the downstream
+                // half-split hands each eye only half the (horizontally-
+                // doubled) picture — the "we only get one eye and split it"
+                // artifact. The 2W x H staging is fixed-size, so the only
+                // reliable signal for "we're receiving a single eye" is the
+                // driver's own stereo-active state. When it reports inactive,
+                // duplicate the mono backbuffer into BOTH halves instead, so
+                // every consumer's split yields the full image per eye (flat,
+                // but correct) until stereo comes back.
+                NvU8 stereoActive = 0;
+                if (g_nvapi) NvAPI_Stereo_IsActivated(g_nvapi, &stereoActive);
+
+                // Log only on transitions — this runs every Present.
+                static NvU8 s_lastStereoActive = 0xFF;
+                if (stereoActive != s_lastStereoActive) {
+                    KLOG(L"PreFramePresentCapture: 3D Vision %s -- %s\n",
+                         stereoActive ? L"active" : L"inactive",
+                         stereoActive ? L"reverse-stereo-blit (both eyes)"
+                                      : L"duplicating mono backbuffer to both eyes");
+                    s_lastStereoActive = stereoActive;
+                }
+
+                if (stereoActive) {
+                    NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, true);
+                    device->StretchRect(backBuffer, nullptr, g_stereoStage, nullptr, D3DTEXF_NONE);
+                    PublishStereoFrame(device);
+                    NvAPI_Stereo_ReverseStereoBlitControl(g_nvapi, false);
+                } else {
+                    // Duplicate the mono backbuffer into each half of the
+                    // 2W x H staging (same bbDesc.Width*2 layout the Direct
+                    // Mode path above writes). Both halves identical, so the
+                    // capture-side half-swap in PublishStereoFrame is a no-op.
+                    D3DSURFACE_DESC bbDesc;
+                    backBuffer->GetDesc(&bbDesc);
+                    RECT dstLeft  = { 0,                  0,
+                                      (LONG)bbDesc.Width,     (LONG)bbDesc.Height };
+                    RECT dstRight = { (LONG)bbDesc.Width, 0,
+                                      (LONG)bbDesc.Width * 2, (LONG)bbDesc.Height };
+                    device->StretchRect(backBuffer, nullptr, g_stereoStage, &dstLeft,  D3DTEXF_NONE);
+                    device->StretchRect(backBuffer, nullptr, g_stereoStage, &dstRight, D3DTEXF_NONE);
+                    PublishStereoFrame(device);
+                }
             }
 
             // Device A's backbuffer is left as-is; the D3D11 overlay
