@@ -552,6 +552,43 @@ static void ReleaseDeviceB()
 //     without a window, and forcing topmost would actively interfere
 //     with the user's VR-viewer GUI / OBS / control panels.
 
+// Sample the OS cursor position over the game's client area and normalize
+// to UV for the stereo-cursor draw. Returns an inactive state (no cursor
+// drawn) when stereo_cursor is off, the game HWND is unknown, or the cursor
+// is outside the client rect — so the caller/shader skip all cursor work.
+// Cheap early-out: when the feature is off this touches nothing but a config
+// int, so the disabled path costs a single branch per frame.
+static CursorState ComputeCursorState()
+{
+    CursorState cs;
+    if (!g_config.stereo_cursor || !s_gameHwnd)
+        return cs;
+
+    POINT pt = {};
+    if (!GetCursorPos(&pt) || !ScreenToClient(s_gameHwnd, &pt))
+        return cs;
+
+    RECT cr = {};
+    if (!GetClientRect(s_gameHwnd, &cr))
+        return cs;
+
+    float w = (float)(cr.right - cr.left);
+    float h = (float)(cr.bottom - cr.top);
+    if (w <= 0.0f || h <= 0.0f)
+        return cs;
+
+    float u = (float)pt.x / w;
+    float v = (float)pt.y / h;
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+        return cs;   // cursor is outside the game window
+
+    cs.active = true;
+    cs.u      = u;
+    cs.v      = v;
+    return cs;
+}
+
+
 static unsigned __stdcall PresentThreadProc(void* /*param*/)
 {
     const bool katangaMode = (g_config.mode == StereoMode::Katanga);
@@ -637,7 +674,8 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
             if (!EnsureStagingOnB()) continue;
             UpdateStagingFromCpuBufferIfFresh();
             Katanga_PublishFrame(s_deviceB, s_contextB, s_sharedSRV,
-                                 g_stagingWidth, g_stagingHeight);
+                                 g_stagingWidth, g_stagingHeight,
+                                 ComputeCursorState());
             continue;
         }
 
@@ -697,6 +735,8 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
         if (!EnsureStagingOnB()) continue;
         UpdateStagingFromCpuBufferIfFresh();
 
+        CursorState cursor = ComputeCursorState();
+
         bool didWeave = false;
         if (g_config.mode == StereoMode::LeiaSR) {
             // Two-pass: upscale staging → full-SbS intermediate (2 × panel
@@ -712,7 +752,7 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
                 s_contextB->OMSetRenderTargets(1, &s_leiaSrcRTV, nullptr);
                 s_contextB->RSSetViewports(1, &vpFull);
                 Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_leiaSrcRTV,
-                                  s_bbWidth * 2, s_bbHeight, StereoMode::Sbs);
+                                  s_bbWidth * 2, s_bbHeight, StereoMode::Sbs, cursor);
 
                 if (LeiaSR_TryInit(s_deviceB, s_contextB, s_overlayHwnd, s_leiaSrcSRV)) {
                     s_contextB->OMSetRenderTargets(1, &s_backBufRTV, nullptr);
@@ -724,7 +764,7 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
         }
         if (!didWeave) {
             Compose_D3D11_Run(s_deviceB, s_contextB, s_sharedSRV, s_backBufRTV,
-                              s_bbWidth, s_bbHeight, g_config.mode);
+                              s_bbWidth, s_bbHeight, g_config.mode, cursor);
         }
 
         HRESULT pr = s_swapChain->Present(1, 0);

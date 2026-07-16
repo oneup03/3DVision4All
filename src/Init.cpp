@@ -134,6 +134,7 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
     NvApi_HookSetDriverMode();
     Win32_HookDisplayModeApis();
     Win32_HookChangeDisplaySettings();
+    Cursor_HookSetCursor();
 
     KLOG(L"3DVision4All init thread complete\n");
     return 0;

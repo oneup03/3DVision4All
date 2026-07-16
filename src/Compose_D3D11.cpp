@@ -30,6 +30,13 @@
 // One pixel shader per StereoMode, compiled lazily via D3DCompile.
 
 #include "Core.h"
+#include "CursorShaderHLSL.h"   // kHLSL_CursorArrow — shared stereo-cursor shape
+
+#include <string.h>   // C header only — do NOT include <string>; the C++ STL
+                       // header embeds a detect_mismatch("RuntimeLibrary", ...)
+                       // directive that collides with SR-md.lib's /MD build at
+                       // link time (Core is /MT). Plain char buffers keep this
+                       // TU free of that directive.
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -58,17 +65,51 @@ static const char kHLSL_VS[] =
 
 // Each PS samples `s0` (staging SRV) via sampler `ss`.
 // uv ∈ [0,1] over the output backbuffer.
-
+//
+// Every mode body resolves the current output pixel to (eyeUV, isLeft):
+// the normalized coordinate WITHIN one eye's image, and which staging eye
+// (left half of the 2W×H staging) it displays. It then calls ApplyCursor()
+// before returning. That keeps the stereo-cursor logic in one shared helper
+// and mode-agnostic — each mode only has to say where its pixel lands in
+// per-eye space.
+//
 // All PS shaders force alpha=1.0 in the output. The DX9 backbuffer's
 // alpha channel comes through reverse-blit; depending on the game it may
 // be undefined or zero, and a zero alpha can cause DWM to composite our
 // overlay as transparent even with DXGI_ALPHA_MODE_IGNORE on some paths.
 
+
+// Prologue prepended when stereo_cursor is ON. Declares the extended constant
+// buffer; the real ApplyCursor (the navigation-arrow shape) is appended from
+// kHLSL_CursorArrow by BuildPixelShaderSource so it stays identical to the
+// Katanga publish path.
+static const char kHLSL_CursorEnabled[] =
+    "cbuffer Params : register(b0) {\n"
+    "    float4 c_size;       // outW, outH, -, -\n"
+    "    float4 c_cursor;     // mouseU, mouseV, separation, active\n"
+    "    float4 c_cursorSz;   // sizeU, sizeV, -, -\n"
+    "    float4 c_cursorCol;  // reserved (arrow self-shades)\n"
+    "};\n";
+
+// Prologue prepended when stereo_cursor is OFF. Keeps the original single-
+// float4 cbuffer and turns ApplyCursor into an identity macro, so the eye-
+// coord math in each body is dead code the compiler eliminates — the
+// resulting shader is equivalent to the pre-cursor version.
+static const char kHLSL_CursorDisabled[] =
+    "cbuffer Sz : register(b0) { float4 c_size; }\n"
+    "#define ApplyCursor(base, eyeUV, isLeft) (base)\n";
+
+
 static const char kHLSL_Sbs[] =
     "Texture2D    s0 : register(t0);\n"
     "SamplerState ss : register(s0);\n"
     "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
-    "{ return float4(s0.Sample(ss, uv).rgb, 1.0); }\n";
+    "{\n"
+    "    float3 base = s0.Sample(ss, uv).rgb;\n"
+    "    float  isLeft = uv.x < 0.5 ? 1.0 : 0.0;\n"
+    "    float2 eyeUV = float2(isLeft > 0.5 ? uv.x * 2.0 : (uv.x - 0.5) * 2.0, uv.y);\n"
+    "    return float4(ApplyCursor(base, eyeUV, isLeft), 1.0);\n"
+    "}\n";
 
 static const char kHLSL_Tab[] =
     "Texture2D    s0 : register(t0);\n"
@@ -76,46 +117,49 @@ static const char kHLSL_Tab[] =
     "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
     "{\n"
     "    float2 src;\n"
-    "    if (uv.y < 0.5) { src.x = uv.x * 0.5;       src.y = uv.y * 2.0; }\n"
-    "    else            { src.x = uv.x * 0.5 + 0.5; src.y = (uv.y - 0.5) * 2.0; }\n"
-    "    return float4(s0.Sample(ss, src).rgb, 1.0);\n"
+    "    float  isLeft;\n"
+    "    if (uv.y < 0.5) { src.x = uv.x * 0.5;       src.y = uv.y * 2.0;         isLeft = 1.0; }\n"
+    "    else            { src.x = uv.x * 0.5 + 0.5; src.y = (uv.y - 0.5) * 2.0; isLeft = 0.0; }\n"
+    "    float3 base = s0.Sample(ss, src).rgb;\n"
+    "    float2 eyeUV = float2(uv.x, src.y);\n"
+    "    return float4(ApplyCursor(base, eyeUV, isLeft), 1.0);\n"
     "}\n";
 
 static const char kHLSL_RowInterlaced[] =
     "Texture2D    s0 : register(t0);\n"
     "SamplerState ss : register(s0);\n"
-    "cbuffer Sz : register(b0) { float4 c_size; }\n"
     "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
     "{\n"
     "    float row  = floor(uv.y * c_size.y);\n"
     "    float side = fmod(row, 2.0);\n"
     "    float u_off = side * 0.5;\n"
-    "    return float4(s0.Sample(ss, float2(uv.x * 0.5 + u_off, uv.y)).rgb, 1.0);\n"
+    "    float3 base = s0.Sample(ss, float2(uv.x * 0.5 + u_off, uv.y)).rgb;\n"
+    "    return float4(ApplyCursor(base, float2(uv.x, uv.y), side < 0.5 ? 1.0 : 0.0), 1.0);\n"
     "}\n";
 
 static const char kHLSL_ColumnInterlaced[] =
     "Texture2D    s0 : register(t0);\n"
     "SamplerState ss : register(s0);\n"
-    "cbuffer Sz : register(b0) { float4 c_size; }\n"
     "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
     "{\n"
     "    float col  = floor(uv.x * c_size.x);\n"
     "    float side = fmod(col, 2.0);\n"
     "    float u_off = side * 0.5;\n"
-    "    return float4(s0.Sample(ss, float2(uv.x * 0.5 + u_off, uv.y)).rgb, 1.0);\n"
+    "    float3 base = s0.Sample(ss, float2(uv.x * 0.5 + u_off, uv.y)).rgb;\n"
+    "    return float4(ApplyCursor(base, float2(uv.x, uv.y), side < 0.5 ? 1.0 : 0.0), 1.0);\n"
     "}\n";
 
 static const char kHLSL_Checkerboard[] =
     "Texture2D    s0 : register(t0);\n"
     "SamplerState ss : register(s0);\n"
-    "cbuffer Sz : register(b0) { float4 c_size; }\n"
     "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
     "{\n"
     "    float col  = floor(uv.x * c_size.x);\n"
     "    float row  = floor(uv.y * c_size.y);\n"
     "    float side = fmod(col + row, 2.0);\n"
     "    float u_off = side * 0.5;\n"
-    "    return float4(s0.Sample(ss, float2(uv.x * 0.5 + u_off, uv.y)).rgb, 1.0);\n"
+    "    float3 base = s0.Sample(ss, float2(uv.x * 0.5 + u_off, uv.y)).rgb;\n"
+    "    return float4(ApplyCursor(base, float2(uv.x, uv.y), side < 0.5 ? 1.0 : 0.0), 1.0);\n"
     "}\n";
 
 
@@ -129,6 +173,33 @@ static const char* HlslForMode(StereoMode m)
     case StereoMode::Checkerboard:     return kHLSL_Checkerboard;
     default:                            return kHLSL_Sbs;
     }
+}
+
+
+// Assemble the full PS source into `out`: cursor prologue (real or identity
+// stub, chosen once from the init-time config) + the mode body. Because the
+// choice is fixed for the process lifetime, each mode's cached shader is
+// compiled exactly once with or without cursor code — no runtime branch,
+// no cost when disabled. Returns false if the buffer is too small.
+static bool BuildPixelShaderSource(StereoMode m, char* out, size_t cap)
+{
+    const char* body = HlslForMode(m);
+    size_t need = strlen(body) + 1;
+    if (g_config.stereo_cursor)
+        need += strlen(kHLSL_CursorEnabled) + strlen(kHLSL_CursorArrow);
+    else
+        need += strlen(kHLSL_CursorDisabled);
+    if (need > cap) return false;
+
+    out[0] = '\0';
+    if (g_config.stereo_cursor) {
+        strcat_s(out, cap, kHLSL_CursorEnabled);   // cbuffer decl
+        strcat_s(out, cap, kHLSL_CursorArrow);     // real ApplyCursor (arrow)
+    } else {
+        strcat_s(out, cap, kHLSL_CursorDisabled);  // cbuffer + identity macro
+    }
+    strcat_s(out, cap, body);                      // mode body
+    return true;
 }
 
 
@@ -173,7 +244,12 @@ static ID3D11PixelShader* EnsurePS(ID3D11Device* device, StereoMode m)
     if (g_psByMode[slot]) return g_psByMode[slot];
 
     ID3DBlob* blob = nullptr;
-    if (!CompileBlob(HlslForMode(m), "ps_4_0", &blob)) return nullptr;
+    char src[4096];
+    if (!BuildPixelShaderSource(m, src, sizeof(src))) {
+        KLOG(L"Compose_D3D11: shader source too large for mode=%d\n", slot);
+        return nullptr;
+    }
+    if (!CompileBlob(src, "ps_4_0", &blob)) return nullptr;
     HRESULT hr = device->CreatePixelShader(blob->GetBufferPointer(),
                                            blob->GetBufferSize(),
                                            nullptr, &g_psByMode[slot]);
@@ -231,7 +307,10 @@ static ID3D11Buffer* EnsureCBuf(ID3D11Device* device)
 {
     if (g_cbuf) return g_cbuf;
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth      = 16;  // single float4
+    bd.ByteWidth      = 64;  // c_size + c_cursor + c_cursorSz + c_cursorCol
+                             // (four float4s). The cursor-disabled shader
+                             // only declares the first float4; binding a
+                             // larger buffer than the shader reads is legal.
     bd.Usage          = D3D11_USAGE_DYNAMIC;
     bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -259,7 +338,8 @@ void Compose_D3D11_Run(ID3D11Device*             device,
                        ID3D11ShaderResourceView* stagingSRV,
                        ID3D11RenderTargetView*   backBufRTV,
                        UINT outW, UINT outH,
-                       StereoMode mode)
+                       StereoMode mode,
+                       const CursorState&        cursor)
 {
     if (!device || !ctx || !stagingSRV || !backBufRTV) return;
 
@@ -273,10 +353,36 @@ void Compose_D3D11_Run(ID3D11Device*             device,
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (SUCCEEDED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
         float* p = (float*)mapped.pData;
+        // c_size
         p[0] = (float)outW;
         p[1] = (float)outH;
         p[2] = 0.0f;
         p[3] = 0.0f;
+        // c_cursor: mouse UV, per-eye disparity, active flag. Ignored by the
+        // cursor-disabled shader (which only declares c_size), but cheap to
+        // always write and required by the enabled one.
+        p[4] = cursor.u;
+        p[5] = cursor.v;
+        p[6] = g_config.cursor_separation;
+        p[7] = cursor.active ? 1.0f : 0.0f;
+        // c_cursorSz: arrow size as a fraction of one eye's width/height.
+        // cursor_size is the arrow height in game pixels; the per-eye image is
+        // (staging_width/2 × staging_height), so dividing by those keeps the
+        // arrow the same on-screen size and correct aspect regardless of mode.
+        float eyeW = (g_stagingWidth  > 0) ? (float)g_stagingWidth * 0.5f : (float)outW;
+        float eyeH = (g_stagingHeight > 0) ? (float)g_stagingHeight        : (float)outH;
+        if (eyeW < 1.0f) eyeW = 1.0f;
+        if (eyeH < 1.0f) eyeH = 1.0f;
+        p[8]  = (float)g_config.cursor_size / eyeW;
+        p[9]  = (float)g_config.cursor_size / eyeH;
+        p[10] = 0.0f;
+        p[11] = 0.0f;
+        // c_cursorCol: reserved. The navigation arrow computes its own facet
+        // shading and dark outline, so no fill colour is needed here.
+        p[12] = 0.0f;
+        p[13] = 0.0f;
+        p[14] = 0.0f;
+        p[15] = 0.0f;
         ctx->Unmap(cb, 0);
     }
 

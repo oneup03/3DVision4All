@@ -142,6 +142,33 @@ struct Config {
     int        confine_cursor = 0;
     int        hide_cursor    = 0;
 
+    // Stereo software cursor. When on, a navigation-arrow pointer is drawn
+    // into BOTH eyes at a horizontal disparity so it fuses at a chosen depth.
+    // Needed because the OS hardware cursor is monoscopic (screen depth), and
+    // in Katanga mode it isn't present in the published VR frame at all. The
+    // arrow's tip is the hotspot — it sits exactly where click events land.
+    //
+    // Costs nothing when off: the compose / Katanga-publish shaders are
+    // compiled WITHOUT any cursor code (the setting is read once at init and
+    // baked into the shader source), so the disabled path is byte-identical
+    // to a build without this feature — no extra sampling, no cbuffer, no
+    // per-frame cursor read. Toggling requires a restart.
+    //
+    // Pairs with hide_cursor: enable that too so the flat OS cursor doesn't
+    // double up with the stereo one on the flat-display output modes. (In
+    // Katanga mode the VR consumer only ever sees the shared texture, so
+    // there's no double-cursor there regardless.)
+    //
+    //   stereo_cursor (default 0): master enable.
+    //   cursor_separation (default 0.0): per-eye horizontal disparity as a
+    //     fraction of one eye's width. 0 = screen depth. Sign is display-
+    //     dependent — flip it if depth comes out inverted. Typical
+    //     magnitudes are small, e.g. 0.01-0.03.
+    //   cursor_size (default 32): arrow height in game pixels.
+    int        stereo_cursor     = 0;
+    float      cursor_separation = 0.0f;
+    int        cursor_size       = 32;
+
     // Capture-mode selector (see Hooks_DX9.cpp::EnsureStereoStage and the
     // Hooked_Direct3DCreate9 chain). The wrapper has two cross-API
     // handoff paths from Device A (D3D9 capture) to Device B (D3D11
@@ -228,6 +255,20 @@ struct Config {
 
 
 // --------------------------------------------------------------------------
+// Per-frame stereo-cursor state, computed by the overlay present thread from
+// the OS cursor position over the game's client area and handed to the
+// compose / Katanga-publish paths. `active` is false when stereo_cursor is
+// off OR the cursor is outside the client area, in which case the draw paths
+// skip all cursor work (the shader early-outs on the active flag).
+
+struct CursorState {
+    bool  active = false;
+    float u      = 0.0f;   // hotspot X in game-client UV [0,1]
+    float v      = 0.0f;   // hotspot Y in game-client UV [0,1]
+};
+
+
+// --------------------------------------------------------------------------
 // Public entry — every proxy's DllMain calls this from DLL_PROCESS_ATTACH.
 
 extern "C" void Injector_EnsureInit(HMODULE hSelf);
@@ -307,6 +348,17 @@ void Win32_HookChangeDisplaySettings();
 
 
 // --------------------------------------------------------------------------
+// Reliable cursor hide — defined in Hooks_DX9.cpp. Inline-hooks
+// user32!SetCursor so that, when hide_cursor is on, EVERY code path that
+// would show a pointer (the game's own SetCursor calls from any thread,
+// DefWindowProc's class-cursor path, etc.) installs a null shape instead.
+// This closes the races the WndProc-subclass + class-cursor-swap approach
+// can't cover on their own. No-op when hide_cursor=0. Idempotent.
+
+void Cursor_HookSetCursor();
+
+
+// --------------------------------------------------------------------------
 // D3D11 compose dispatch — defined in Compose_D3D11.cpp.
 // Runs on Device B (D3D11). Samples the staging SRV (opened cross-API from
 // the DX9Ex shared handle) and writes the mode-appropriate stereo composite
@@ -317,7 +369,8 @@ void Compose_D3D11_Run(ID3D11Device*             device,
                        ID3D11ShaderResourceView* stagingSRV,
                        ID3D11RenderTargetView*   backBufRTV,
                        UINT outW, UINT outH,
-                       StereoMode mode);
+                       StereoMode mode,
+                       const CursorState&        cursor);
 
 void Compose_D3D11_Release();
 
@@ -357,7 +410,8 @@ void Katanga_PublishFrame(ID3D11Device*              device,
                           ID3D11DeviceContext*       ctx,
                           ID3D11ShaderResourceView*  stagingSRV,
                           UINT                       stagingWidth,
-                          UINT                       stagingHeight);
+                          UINT                       stagingHeight,
+                          const CursorState&         cursor);
 void Katanga_Shutdown();
 
 

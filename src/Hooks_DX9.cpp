@@ -746,6 +746,76 @@ static void MaybeSubclassGameHwnd(HWND hwnd)
 }
 
 
+// --------------------------------------------------------------------------
+// Reliable cursor hide via a user32!SetCursor inline hook.
+//
+// The WndProc subclass + class-cursor swap above cover most games, but they
+// lose the race on titles that:
+//   - call SetCursor from their render/input thread OUTSIDE WM_SETCURSOR
+//     (so swallowing WM_SETCURSOR never sees it),
+//   - re-subclass their own WndProc after we did (knocking ours out),
+//   - recreate their HWND on device reset (our subclass HWND goes stale), or
+//   - run behind anti-cheat that blocks SetWindowLongPtr.
+// The visible pointer is simply whatever the last SetCursor call installed,
+// so any SetCursor we don't intercept flickers the OS cursor back on — which
+// is exactly the "doesn't always work" symptom.
+//
+// Hooking the exported user32!SetCursor removes the race entirely: every
+// path that shows a pointer funnels through it (including DefWindowProc's
+// class-cursor handling on most Windows builds), so forcing the argument to
+// NULL hides the 2D cursor regardless of caller or thread. GetCursorPos is
+// untouched, so the stereo 3D cursor still tracks the real pointer position.
+//
+// We also stash the shape the game *asked* for; a later change can render
+// that actual shape (arrow / I-beam / hand) as the 3D cursor instead of the
+// generic reticle.
+typedef HCURSOR (WINAPI* t_SetCursor)(HCURSOR);
+static t_SetCursor pOrigSetCursor   = nullptr;
+static HCURSOR     s_lastGameCursor = nullptr;   // last shape the game requested
+
+static HCURSOR WINAPI Hooked_SetCursor(HCURSOR hCursor)
+{
+    if (g_config.hide_cursor) {
+        if (hCursor) s_lastGameCursor = hCursor;   // aligned pointer store
+        // Install a null shape instead of what the game asked for. Return
+        // the actual previous cursor to honor the SetCursor contract.
+        return pOrigSetCursor ? pOrigSetCursor(nullptr) : nullptr;
+    }
+    return pOrigSetCursor ? pOrigSetCursor(hCursor) : nullptr;
+}
+
+void Cursor_HookSetCursor()
+{
+    if (!g_config.hide_cursor) {
+        KLOG(L"  Cursor_HookSetCursor: hide_cursor=0 -- not hooking SetCursor\n");
+        return;
+    }
+    if (pOrigSetCursor) return;   // already hooked (idempotent)
+
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    if (!u32) u32 = LoadLibraryW(L"user32.dll");
+    if (!u32) {
+        KLOG(L"  Cursor_HookSetCursor: user32 not present\n");
+        return;
+    }
+    void* target = (void*)GetProcAddress(u32, "SetCursor");
+    if (!target) {
+        KLOG(L"  Cursor_HookSetCursor: GetProcAddress(SetCursor) failed\n");
+        return;
+    }
+
+    SIZE_T hook_id = 0;
+    DWORD dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigSetCursor,
+                                     target, Hooked_SetCursor, 0);
+    if (FAILED(dwOsErr)) {
+        KLOG(L"  Cursor_HookSetCursor: Hook(SetCursor) failed 0x%x\n", dwOsErr);
+        pOrigSetCursor = nullptr;
+        return;
+    }
+    KLOG(L"  hooked user32!SetCursor for reliable hide_cursor\n");
+}
+
+
 // When the render override is active, the game's BB is smaller than the
 // monitor and most games keep their HWND at the BB size — landing the
 // HWND in the top-left corner of the panel. The overlay (HTTRANSPARENT)

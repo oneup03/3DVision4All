@@ -95,8 +95,12 @@
 // relaunching the consumer alone is enough to reconnect.
 
 #include "Core.h"
+#include "CursorShaderHLSL.h"   // kHLSL_CursorArrow — shared stereo-cursor shape
 
 #include <stdint.h>
+#include <string.h>   // C header only — see the note in Compose_D3D11.cpp; do
+                      // NOT include <string> here (RuntimeLibrary mismatch vs
+                      // SR-md.lib at link time).
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -134,10 +138,15 @@ static UINT                    s_kTexHeight    = 0;
 
 // Shader pipeline state. Created lazily on the first publish call;
 // reused for the lifetime of Device B.
-static ID3D11VertexShader*    s_kVS      = nullptr;
-static ID3D11PixelShader*     s_kPS      = nullptr;
-static ID3D11SamplerState*    s_kSampler = nullptr;
-static ID3D11RasterizerState* s_kRS      = nullptr;
+static ID3D11VertexShader*    s_kVS       = nullptr;
+static ID3D11PixelShader*     s_kPS       = nullptr;
+static ID3D11SamplerState*    s_kSampler  = nullptr;
+static ID3D11RasterizerState* s_kRS       = nullptr;
+
+// Stereo-cursor pipeline extras. Created lazily and ONLY when
+// g_config.stereo_cursor is set — a plain publish never allocates them.
+static ID3D11PixelShader*     s_kPSCursor = nullptr;
+static ID3D11Buffer*          s_kCBuf     = nullptr;   // 48-byte cursor cbuffer
 
 
 // Fullscreen triangle generated from SV_VertexID — no VB / IA layout
@@ -166,6 +175,37 @@ static const char kHLSL_KatangaPS[] =
     "{\n"
     "    float2 src = float2(frac(uv.x + 0.5), uv.y);\n"
     "    return float4(s0.Sample(ss, src).rgb, 1.0);\n"
+    "}\n";
+
+// Cursor-enabled variant of the publish PS. Compiled lazily and ONLY when
+// stereo_cursor is on, so the default publish path (kHLSL_KatangaPS above)
+// is untouched and pays nothing for this feature. The full source is
+// assembled at compile time as: HEAD (texture/sampler/cbuffer) +
+// kHLSL_CursorArrow (the shared ApplyCursor, identical to the compose path) +
+// MAIN — so the arrow shape can never drift between the two paths.
+//
+// The swap gotcha: this pass publishes R-on-LEFT / L-on-RIGHT (frac(uv.x +
+// 0.5) samples the opposite half), so the output LEFT half shows the R eye
+// and the output RIGHT half shows the L eye. isLeft in MAIN is therefore
+// computed from the RIGHT half — the mirror of the overlay compose path —
+// so the per-eye disparity direction matches and the cursor fuses at the
+// same depth as it would on a flat display.
+static const char kHLSL_KatangaPSCursorHead[] =
+    "Texture2D    s0 : register(t0);\n"
+    "SamplerState ss : register(s0);\n"
+    "cbuffer Params : register(b0) {\n"
+    "    float4 c_cursor;     // mouseU, mouseV, separation, active\n"
+    "    float4 c_cursorSz;   // sizeU, sizeV, -, -\n"
+    "    float4 c_cursorCol;  // reserved (arrow self-shades)\n"
+    "};\n";
+static const char kHLSL_KatangaPSCursorMain[] =
+    "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target\n"
+    "{\n"
+    "    float2 src = float2(frac(uv.x + 0.5), uv.y);\n"
+    "    float3 base = s0.Sample(ss, src).rgb;\n"
+    "    float  isLeft = uv.x < 0.5 ? 0.0 : 1.0;   // left half = R eye (swapped)\n"
+    "    float2 eyeUV = float2(uv.x < 0.5 ? uv.x * 2.0 : (uv.x - 0.5) * 2.0, uv.y);\n"
+    "    return float4(ApplyCursor(base, eyeUV, isLeft), 1.0);\n"
     "}\n";
 
 
@@ -230,7 +270,8 @@ static bool SetupKatangaIpc()
 // only on shader-compile failure, which shouldn't happen in practice.
 static bool EnsurePipeline(ID3D11Device* device)
 {
-    if (s_kVS && s_kPS && s_kSampler && s_kRS) return true;
+    bool cursorReady = !g_config.stereo_cursor || (s_kPSCursor && s_kCBuf);
+    if (s_kVS && s_kPS && s_kSampler && s_kRS && cursorReady) return true;
 
     HRESULT hr;
 
@@ -310,6 +351,55 @@ static bool EnsurePipeline(ID3D11Device* device)
             KLOG(L"Katanga: CreateRasterizerState hr=0x%x\n", hr);
             s_kRS = nullptr;
             return false;
+        }
+    }
+
+    // Stereo-cursor extras: compiled/created only when the feature is on, so
+    // the default publish path allocates nothing for it.
+    if (g_config.stereo_cursor) {
+        if (!s_kPSCursor) {
+            // Assemble: HEAD + shared arrow (ApplyCursor) + MAIN.
+            char psSrc[4096];
+            psSrc[0] = '\0';
+            strcat_s(psSrc, sizeof(psSrc), kHLSL_KatangaPSCursorHead);
+            strcat_s(psSrc, sizeof(psSrc), kHLSL_CursorArrow);
+            strcat_s(psSrc, sizeof(psSrc), kHLSL_KatangaPSCursorMain);
+
+            ID3DBlob* blob = nullptr;
+            ID3DBlob* errs = nullptr;
+            hr = D3DCompile(psSrc, strlen(psSrc),
+                            "KatangaPSCursor", nullptr, nullptr,
+                            "main", "ps_4_0", 0, 0, &blob, &errs);
+            if (FAILED(hr)) {
+                KLOG(L"Katanga: cursor PS compile failed hr=0x%x errs=%S\n",
+                     hr, errs ? (const char*)errs->GetBufferPointer() : "(none)");
+                if (errs) errs->Release();
+                return false;
+            }
+            if (errs) errs->Release();
+            hr = device->CreatePixelShader(blob->GetBufferPointer(),
+                                           blob->GetBufferSize(),
+                                           nullptr, &s_kPSCursor);
+            blob->Release();
+            if (FAILED(hr) || !s_kPSCursor) {
+                KLOG(L"Katanga: CreatePixelShader(cursor) hr=0x%x\n", hr);
+                s_kPSCursor = nullptr;
+                return false;
+            }
+        }
+
+        if (!s_kCBuf) {
+            D3D11_BUFFER_DESC bd = {};
+            bd.ByteWidth      = 48;  // c_cursor + c_cursorSz + c_cursorCol
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            hr = device->CreateBuffer(&bd, nullptr, &s_kCBuf);
+            if (FAILED(hr) || !s_kCBuf) {
+                KLOG(L"Katanga: CreateBuffer(cursor) hr=0x%x\n", hr);
+                s_kCBuf = nullptr;
+                return false;
+            }
         }
     }
 
@@ -417,7 +507,8 @@ void Katanga_PublishFrame(ID3D11Device*              device,
                           ID3D11DeviceContext*       ctx,
                           ID3D11ShaderResourceView*  stagingSRV,
                           UINT                       stagingWidth,
-                          UINT                       stagingHeight)
+                          UINT                       stagingHeight,
+                          const CursorState&         cursor)
 {
     if (!device || !ctx || !stagingSRV || stagingWidth == 0 || stagingHeight == 0)
         return;
@@ -431,6 +522,39 @@ void Katanga_PublishFrame(ID3D11Device*              device,
             return;
     }
 
+    // Pick the plain or cursor variant. When stereo_cursor is off this is
+    // s_kPS and the path below is identical to the original publish.
+    bool                  useCursor = (g_config.stereo_cursor != 0) && s_kPSCursor && s_kCBuf;
+    ID3D11PixelShader*    ps        = useCursor ? s_kPSCursor : s_kPS;
+
+    if (useCursor) {
+        D3D11_MAPPED_SUBRESOURCE m = {};
+        if (SUCCEEDED(ctx->Map(s_kCBuf, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+            float* p = (float*)m.pData;
+            // c_cursor
+            p[0]  = cursor.u;
+            p[1]  = cursor.v;
+            p[2]  = g_config.cursor_separation;
+            p[3]  = cursor.active ? 1.0f : 0.0f;
+            // c_cursorSz — arrow size as a fraction of one eye (staging is
+            // 2W × H, so an eye is stagingWidth/2 × stagingHeight in pixels).
+            float eyeW = (float)stagingWidth * 0.5f;
+            float eyeH = (float)stagingHeight;
+            if (eyeW < 1.0f) eyeW = 1.0f;
+            if (eyeH < 1.0f) eyeH = 1.0f;
+            p[4]  = (float)g_config.cursor_size / eyeW;
+            p[5]  = (float)g_config.cursor_size / eyeH;
+            p[6]  = 0.0f;
+            p[7]  = 0.0f;
+            // c_cursorCol — reserved (the arrow self-shades).
+            p[8]  = 0.0f;
+            p[9]  = 0.0f;
+            p[10] = 0.0f;
+            p[11] = 0.0f;
+            ctx->Unmap(s_kCBuf, 0);
+        }
+    }
+
     // Single fullscreen-triangle pass: staging SRV → shared RTV with
     // half-swap and fixed BGRA8 output. We save no state — the
     // overlay's present loop will re-bind whatever it needs next
@@ -442,9 +566,11 @@ void Katanga_PublishFrame(ID3D11Device*              device,
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->IASetInputLayout(nullptr);
     ctx->VSSetShader(s_kVS, nullptr, 0);
-    ctx->PSSetShader(s_kPS, nullptr, 0);
+    ctx->PSSetShader(ps, nullptr, 0);
     ctx->PSSetShaderResources(0, 1, &stagingSRV);
     ctx->PSSetSamplers(0, 1, &s_kSampler);
+    if (useCursor)
+        ctx->PSSetConstantBuffers(0, 1, &s_kCBuf);
     ctx->Draw(3, 0);
 
     // Unbind the staging SRV so the next Compose pass on Device B can
@@ -484,10 +610,12 @@ void Katanga_Shutdown()
         ReleaseSharedTexture();
     }
 
-    if (s_kRS)      { s_kRS->Release();      s_kRS      = nullptr; }
-    if (s_kSampler) { s_kSampler->Release(); s_kSampler = nullptr; }
-    if (s_kPS)      { s_kPS->Release();      s_kPS      = nullptr; }
-    if (s_kVS)      { s_kVS->Release();      s_kVS      = nullptr; }
+    if (s_kCBuf)     { s_kCBuf->Release();     s_kCBuf     = nullptr; }
+    if (s_kPSCursor) { s_kPSCursor->Release(); s_kPSCursor = nullptr; }
+    if (s_kRS)       { s_kRS->Release();       s_kRS       = nullptr; }
+    if (s_kSampler)  { s_kSampler->Release();  s_kSampler  = nullptr; }
+    if (s_kPS)       { s_kPS->Release();       s_kPS       = nullptr; }
+    if (s_kVS)       { s_kVS->Release();       s_kVS       = nullptr; }
 
     if (s_kSetupMutex) { CloseHandle(s_kSetupMutex);     s_kSetupMutex = nullptr; }
     if (s_kMappedView) { UnmapViewOfFile(s_kMappedView); s_kMappedView = nullptr; }

@@ -82,6 +82,17 @@ void Config_Load(Config& cfg)
     cfg.confine_cursor = GetPrivateProfileIntW(L"render", L"confine_cursor", 0, iniPath);
     cfg.hide_cursor    = GetPrivateProfileIntW(L"render", L"hide_cursor",    0, iniPath);
 
+    cfg.stereo_cursor = GetPrivateProfileIntW(L"render", L"stereo_cursor", 0, iniPath);
+    {
+        // cursor_separation is a float — GetPrivateProfileInt can't parse it,
+        // so read it as a string and convert.
+        wchar_t sepBuf[64] = L"";
+        GetPrivateProfileStringW(L"render", L"cursor_separation", L"0.0",
+                                 sepBuf, _countof(sepBuf), iniPath);
+        cfg.cursor_separation = (float)_wtof(sepBuf);
+    }
+    cfg.cursor_size = GetPrivateProfileIntW(L"render", L"cursor_size", 32, iniPath);
+
     cfg.alternate_capture_mode = GetPrivateProfileIntW(L"render", L"alternate_capture_mode", 0, iniPath);
 
     cfg.render_width  = (UINT)GetPrivateProfileIntW(L"render", L"render_width",  0, iniPath);
