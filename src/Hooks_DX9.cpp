@@ -116,6 +116,16 @@ static HRESULT (__stdcall *pOrigPresent)(
 static HRESULT (__stdcall *pOrigPresentEx)(
     IDirect3DDevice9Ex*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD) = nullptr;
 
+// IDirect3DSwapChain9::Present — separate vtable slot from
+// IDirect3DDevice9::Present. Games that present via
+// device->GetSwapChain(0)->Present(...) (e.g. GTA IV) never touch the
+// device-level Present, so without this hook our per-frame stereo
+// capture and the overlay it spawns never fire even though the game
+// renders fine. Note the trailing DWORD dwFlags absent from the device
+// Present signature.
+static HRESULT (__stdcall *pOrigSwapChainPresent)(
+    IDirect3DSwapChain9*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD) = nullptr;
+
 static HRESULT (__stdcall *pOrigReset)(
     IDirect3DDevice9*, D3DPRESENT_PARAMETERS*) = nullptr;
 
@@ -665,6 +675,21 @@ static void ApplyPresentParamOverrides(D3DPRESENT_PARAMETERS* pp)
     if (g_config.force_windowed) {
         pp->Windowed                   = TRUE;
         pp->FullScreen_RefreshRateInHz = 0;
+        // A windowed swap chain rejects the fullscreen-only present
+        // intervals (TWO/THREE/FOUR) with D3DERR_INVALIDCALL. A game that
+        // asked for a FULLSCREEN device leaves one of those in
+        // PresentationInterval, so flipping Windowed->TRUE without clamping
+        // can make CreateDevice fail. Clamp to a windowed-legal interval so
+        // the forced-windowed call stays valid. (disable_vsync below may
+        // still override to IMMEDIATE, which is also windowed-legal.)
+        DWORD pi = pp->PresentationInterval;
+        if (pi != D3DPRESENT_INTERVAL_DEFAULT &&
+            pi != D3DPRESENT_INTERVAL_ONE &&
+            pi != D3DPRESENT_INTERVAL_IMMEDIATE) {
+            KLOG(L"  force_windowed: PresentationInterval 0x%x illegal in "
+                 L"windowed mode -- clamping to INTERVAL_ONE\n", pi);
+            pp->PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+        }
     }
     if (g_config.disable_vsync) {
         pp->PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
@@ -972,17 +997,42 @@ static void PostFramePresentNotify()
     Overlay_NotifyFrame();
 }
 
+// Same-thread present-capture re-entrancy guard. A game presents through
+// exactly one of Device9::Present / Device9Ex::PresentEx / SwapChain9::
+// Present, but the D3D9 runtime's device-level Present can internally
+// route through the swap chain's Present code that we ALSO hook — which
+// would capture the same frame twice (double reverse-stereo-blit) if we
+// let the nested call run. The present path is single-threaded per
+// device, but a process can drive two devices from two threads, so this
+// is thread-local rather than a global: it suppresses only genuine
+// same-thread re-entry, never a second device's legitimate present.
+static thread_local int t_presentCaptureDepth = 0;
+
+// Shared capture/notify wrapper for all three present entry points. Only
+// the outermost (depth==1) call on this thread runs the capture, so a
+// device Present that internally invokes the hooked swap-chain Present
+// captures exactly once.
+template <typename ChainFn>
+static HRESULT PresentCaptured(IDirect3DDevice9* device, ChainFn&& chain)
+{
+    const bool outermost = (++t_presentCaptureDepth == 1);
+    if (outermost && device) PreFramePresentCapture(device);
+    HRESULT hr = chain();
+    if (outermost) PostFramePresentNotify();
+    --t_presentCaptureDepth;
+    return hr;
+}
+
 static HRESULT __stdcall Hooked_Present(IDirect3DDevice9* This,
                                          const RECT*    pSourceRect,
                                          const RECT*    pDestRect,
                                          HWND           hDestWindowOverride,
                                          const RGNDATA* pDirtyRegion)
 {
-    PreFramePresentCapture(This);
-    HRESULT presentHr = pOrigPresent(This, pSourceRect, pDestRect,
-                                     hDestWindowOverride, pDirtyRegion);
-    PostFramePresentNotify();
-    return presentHr;
+    return PresentCaptured(This, [&] {
+        return pOrigPresent(This, pSourceRect, pDestRect,
+                            hDestWindowOverride, pDirtyRegion);
+    });
 }
 
 // IDirect3DDevice9Ex::PresentEx hook. Same capture/notify body as
@@ -996,11 +1046,32 @@ static HRESULT __stdcall Hooked_PresentEx(IDirect3DDevice9Ex* This,
                                            const RGNDATA* pDirtyRegion,
                                            DWORD          dwFlags)
 {
-    PreFramePresentCapture(This);
-    HRESULT presentHr = pOrigPresentEx(This, pSourceRect, pDestRect,
-                                       hDestWindowOverride, pDirtyRegion, dwFlags);
-    PostFramePresentNotify();
-    return presentHr;
+    return PresentCaptured(This, [&] {
+        return pOrigPresentEx(This, pSourceRect, pDestRect,
+                              hDestWindowOverride, pDirtyRegion, dwFlags);
+    });
+}
+
+// IDirect3DSwapChain9::Present hook — the path games like GTA IV use
+// instead of the device-level Present. Resolve the owning device from
+// the swap chain so the capture (which needs the device to blit) works
+// the same as the device-Present path; the re-entrancy guard makes a
+// nested runtime call harmless.
+static HRESULT __stdcall Hooked_SwapChainPresent(IDirect3DSwapChain9* This,
+                                                  const RECT*    pSourceRect,
+                                                  const RECT*    pDestRect,
+                                                  HWND           hDestWindowOverride,
+                                                  const RGNDATA* pDirtyRegion,
+                                                  DWORD          dwFlags)
+{
+    IDirect3DDevice9* device = nullptr;
+    if (FAILED(This->GetDevice(&device))) device = nullptr;
+    HRESULT hr = PresentCaptured(device, [&] {
+        return pOrigSwapChainPresent(This, pSourceRect, pDestRect,
+                                     hDestWindowOverride, pDirtyRegion, dwFlags);
+    });
+    if (device) device->Release();
+    return hr;
 }
 
 
@@ -1314,6 +1385,21 @@ static void PostDeviceCreateSetup(IDirect3DDevice9* pDevice9)
     if (FAILED(dwOsErr)) KLOG(L"Failed to hook Present 0x%x\n", dwOsErr);
     else                 KLOG(L"Hooked Present\n");
 
+    // Also hook the implicit swap chain's Present. Games that present via
+    // device->GetSwapChain(0)->Present(...) (GTA IV) never call the
+    // device-level Present above, so this is the only path that fires our
+    // capture for them. The re-entrancy guard in PresentCaptured keeps
+    // this harmless for games that use the device-level Present instead.
+    LPVOID swapPresentAddr = lpvtbl_Present_SwapChain(pDevice9);
+    if (swapPresentAddr) {
+        dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigSwapChainPresent,
+                                   swapPresentAddr, Hooked_SwapChainPresent, 0);
+        if (FAILED(dwOsErr)) KLOG(L"Failed to hook SwapChain::Present 0x%x\n", dwOsErr);
+        else                 KLOG(L"Hooked SwapChain::Present\n");
+    } else {
+        KLOG(L"  lpvtbl_Present_SwapChain returned null -- SwapChain::Present not hooked\n");
+    }
+
     dwOsErr = g_nktInProc.Hook(&hook_id, (void**)&pOrigReset,
                                lpvtbl_Reset(pDevice9), Hooked_Reset, 0);
     if (FAILED(dwOsErr)) KLOG(L"Failed to hook Reset 0x%x\n", dwOsErr);
@@ -1405,6 +1491,10 @@ static HRESULT __stdcall Hooked_CreateDevice(IDirect3D9* This,
                                    BehaviorFlags, pPresentationParameters,
                                    ppReturnedDeviceInterface);
     if (FAILED(hr)) {
+        // Some games (GTA IV) fail their first CreateDevice with
+        // D3DERR_INVALIDCALL and immediately retry with adjusted params of
+        // their own — that's the game's transient, not ours, so just report
+        // and let it retry.
         KLOG(L"Hooked_CreateDevice: original failed hr=0x%x\n", hr);
         return hr;
     }

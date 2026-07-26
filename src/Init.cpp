@@ -124,6 +124,7 @@ static unsigned __stdcall InitThreadProc(void* /*param*/)
          g_config.render_width, g_config.render_height);
     KLOG(L"  copy          = %ux%u (0,0 = no cap)\n",
          g_config.copy_width, g_config.copy_height);
+    KLOG(L"  log_level     = %d (0=off,1=info,2=verbose)\n", g_config.log_level);
     KLOG(L"  log_path      = %s\n", g_config.log_path);
 
 #ifdef _DEBUG

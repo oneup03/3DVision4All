@@ -465,6 +465,7 @@ extern "C" LPVOID lpvtbl_PresentEx_DX9(IDirect3DDevice9* pDX9DeviceEx);
 extern "C" LPVOID lpvtbl_Reset(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_ResetEx(IDirect3DDevice9* pDX9DeviceEx);
 extern "C" LPVOID lpvtbl_CreateAdditionalSwapChain(IDirect3DDevice9* pDX9Device);
+extern "C" LPVOID lpvtbl_Present_SwapChain(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateTexture(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateCubeTexture(IDirect3DDevice9* pDX9Device);
 extern "C" LPVOID lpvtbl_CreateVolumeTexture(IDirect3DDevice9* pDX9Device);

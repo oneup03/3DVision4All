@@ -84,6 +84,30 @@ LPVOID lpvtbl_CreateAdditionalSwapChain(IDirect3DDevice9* pDX9Device)
     return pDX9Device->lpVtbl->CreateAdditionalSwapChain;
 }
 
+// Address of IDirect3DSwapChain9::Present for the device's implicit
+// (primary) swap chain. Games that present via
+// device->GetSwapChain(0)->Present(...) go through THIS function, a
+// different vtable slot than IDirect3DDevice9::Present — so without
+// hooking it too, our per-frame capture never fires for such games
+// (e.g. GTA IV) even though the picture renders fine. The swap-chain
+// vtable lives in d3d9.dll and is shared across all swap-chain
+// instances, so extracting the address from swap chain 0 and hooking it
+// intercepts every IDirect3DSwapChain9::Present call. We release the
+// swap chain immediately; the function address stays valid.
+LPVOID lpvtbl_Present_SwapChain(IDirect3DDevice9* pDX9Device)
+{
+    IDirect3DSwapChain9* pSwapChain = NULL;
+    LPVOID present = NULL;
+    if (!pDX9Device)
+        return NULL;
+    if (pDX9Device->lpVtbl->GetSwapChain(pDX9Device, 0, &pSwapChain) != 0 ||
+        !pSwapChain)
+        return NULL;
+    present = pSwapChain->lpVtbl->Present;
+    pSwapChain->lpVtbl->Release(pSwapChain);
+    return present;
+}
+
 LPVOID lpvtbl_CreateTexture(IDirect3DDevice9* pDX9Device)
 {
     if (!pDX9Device)
