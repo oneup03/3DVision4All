@@ -589,11 +589,44 @@ static CursorState ComputeCursorState()
 }
 
 
+// The overlay window, its swap chain, the full-SbS intermediate and the
+// weave viewport are ALL sized from the monitor rect / window client rect
+// (GameMonitorRect -> GetClientRect below). Those APIs return DPI-*virtualized*
+// (logical) pixels when the calling thread is DPI-unaware: on a 3840x2160
+// panel at 150% scale they hand back 2560x1440. SbS output tolerates the DWM
+// rescale, but the LeiaSR weave is subpixel-exact against the physical
+// lenticular grid, so a logical-pixel output weaves to garbage. Make THIS
+// thread (which owns the overlay window and every measurement below)
+// per-monitor DPI aware so it sizes in true physical pixels and the backbuffer
+// maps 1:1 to the panel. Per-thread => the injected game's process-wide
+// awareness is untouched. Loaded dynamically: graceful no-op on < Win10 1607.
+static void MakeThreadPerMonitorDpiAware()
+{
+    typedef HANDLE (WINAPI *PFN_SetThreadDpiAwarenessContext)(HANDLE);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32) return;
+    auto pSet = (PFN_SetThreadDpiAwarenessContext)
+        GetProcAddress(user32, "SetThreadDpiAwarenessContext");
+    if (!pSet) {
+        KLOG(L"Output_Overlay: SetThreadDpiAwarenessContext unavailable -- overlay may be DPI-scaled\n");
+        return;
+    }
+    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (DPI_AWARENESS_CONTEXT)-4
+    HANDLE prev = pSet((HANDLE)-4);
+    KLOG(L"Output_Overlay: present thread set per-monitor-v2 DPI aware (prev=%p)\n", prev);
+}
+
+
 static unsigned __stdcall PresentThreadProc(void* /*param*/)
 {
     const bool katangaMode = (g_config.mode == StereoMode::Katanga);
     KLOG(L"Output_Overlay: present thread started (D3D11, %s)\n",
          katangaMode ? L"Katanga headless" : L"windowed overlay");
+
+    // Must run before any monitor/window measurement so the overlay is sized
+    // in physical pixels (see note above). Harmless for the katanga headless
+    // path, which owns no window.
+    MakeThreadPerMonitorDpiAware();
 
     if (katangaMode) {
         if (!CreateDeviceB_Headless()) {
