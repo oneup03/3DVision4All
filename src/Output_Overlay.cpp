@@ -59,6 +59,11 @@ static HANDLE                  s_thread        = nullptr;
 static HANDLE                  s_frameEvent    = nullptr;
 static HWND                    s_gameHwnd      = nullptr;
 static HWND                    s_overlayHwnd   = nullptr;
+// Screen rect the overlay was created at, in physical pixels. The window is
+// never legitimately resized after creation (the swap chain is sized once to
+// match), so any drift from this is somebody else moving our window — see the
+// re-assert in the present loop.
+static RECT                    s_overlayRect   = {};
 
 static ID3D11Device*           s_deviceB       = nullptr;
 static ID3D11DeviceContext*    s_contextB      = nullptr;
@@ -203,6 +208,7 @@ static HWND CreateOverlayWindow(HMODULE hSelf, HWND gameHwnd)
     ShowWindow(hwnd, SW_SHOWNA);
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    s_overlayRect = mr;
 
     KLOG(L"Output_Overlay: overlay window %p at (%d,%d) %dx%d\n", hwnd, x, y, w, h);
     return hwnd;
@@ -761,8 +767,44 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
             if (wantShown && g_config.hide_cursor)
                 SetCursor(nullptr);
             if (!wantShown) continue;
-            SetWindowPos(s_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+            // Re-assert geometry, not just Z-order. The SR service repositions
+            // the weaver's window onto the SR panel roughly a second after
+            // init, and it does so from a DPI-unaware context: on a >100%-
+            // scaled panel Windows multiplies that request by the scale
+            // factor, so our physical-pixel-sized window comes back
+            // scale-times too large. Only the top-left panel-sized region is
+            // then visible and the weave no longer lands 1:1 on the lenticular
+            // grid, which reads as a DPI-factor zoom with the 3D gone. We
+            // created this window at the monitor rect and never resize it
+            // ourselves, so any drift is somebody else's SetWindowPos and
+            // snapping back is safe. The service accepts the correction —
+            // it's a one-shot resize, not a fight.
+            RECT wr = {};
+            bool drifted = GetWindowRect(s_overlayHwnd, &wr) &&
+                           (wr.left   != s_overlayRect.left  ||
+                            wr.top    != s_overlayRect.top   ||
+                            wr.right  != s_overlayRect.right ||
+                            wr.bottom != s_overlayRect.bottom);
+            if (drifted) {
+                static int s_driftLogs = 0;
+                if (s_driftLogs < 8) {
+                    ++s_driftLogs;
+                    KLOG(L"Output_Overlay: overlay window moved externally to (%d,%d) %dx%d -- restoring (%d,%d) %dx%d\n",
+                         wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+                         s_overlayRect.left, s_overlayRect.top,
+                         s_overlayRect.right  - s_overlayRect.left,
+                         s_overlayRect.bottom - s_overlayRect.top);
+                }
+                SetWindowPos(s_overlayHwnd, HWND_TOPMOST,
+                             s_overlayRect.left, s_overlayRect.top,
+                             s_overlayRect.right  - s_overlayRect.left,
+                             s_overlayRect.bottom - s_overlayRect.top,
+                             SWP_NOACTIVATE);
+            } else {
+                SetWindowPos(s_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
         }
 
         if (!EnsureStagingOnB()) continue;
@@ -790,8 +832,11 @@ static unsigned __stdcall PresentThreadProc(void* /*param*/)
                 if (LeiaSR_TryInit(s_deviceB, s_contextB, s_overlayHwnd, s_leiaSrcSRV)) {
                     s_contextB->OMSetRenderTargets(1, &s_backBufRTV, nullptr);
                     s_contextB->RSSetViewports(1, &vpPanel);
-                    LeiaSR_Weave();
-                    didWeave = true;
+                    // False when the weaver just went away (SR display
+                    // unplugged mid-session) — fall through to the compose
+                    // path so this frame still shows something and every
+                    // later frame presents plain SbS.
+                    didWeave = LeiaSR_Weave();
                 }
             }
         }

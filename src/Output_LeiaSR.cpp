@@ -17,12 +17,15 @@
 
 // LeiaSR (Simulated Reality) weaver hand-off for the overlay output path.
 //
-// Uses SR-lib's SRInterfaceDX11 (c:\Users\oneup\source\repos\oneup03\SR-lib)
-// so we can stay on the same D3D11 Device B that the other stereo modes use.
+// Uses SR-lib's SRInterfaceDX11 (third_party/SR-lib, api_expansion branch) so
+// we can stay on the same D3D11 Device B that the other stereo modes use.
 // SR-lib is statically linked; the SR runtime DLLs are delay-loaded by the
 // proxy projects so the build still runs on machines without SR installed.
-// If the runtime is missing, CreateSRInterfaceDX11 returns failure and we
-// fall back to the regular compose shader.
+// SR-lib probes both SimulatedRealityCore.dll and the backend weaver DLL
+// (SimulatedRealityDirectX.dll) with LoadLibrary before it touches the SDK,
+// so a missing runtime surfaces as CreateSRInterfaceDX11 returning
+// E_NOINTERFACE rather than an uncatchable delay-load SEH — we then fall back
+// to the regular compose shader.
 //
 // Lifecycle (called from the overlay present thread):
 //   1. Per-frame: LeiaSR_TryInit(device, ctx, hwnd, stagingSRV).
@@ -30,7 +33,15 @@
 //      calls are cheap (cached state, rebind if SRV changed).
 //   2. Per-frame: bind backbuffer as RT, then LeiaSR_Weave().
 //      The weaver writes the lenticular-woven stereo into the bound RT.
+//      Returns false if the weave didn't happen, so the caller can compose
+//      the frame normally instead of Presenting an untouched backbuffer.
 //   3. Teardown: LeiaSR_Shutdown().
+//
+// Exceptions: SR-lib contains the ones thrown during context creation, but
+// weave() is unguarded there and does throw when the SR display is unplugged
+// mid-session. We catch that here and disable the weaver for the rest of the
+// session (rather than crashing the injected game) — this TU is compiled with
+// /EHsc for exactly that, see Core.vcxproj.
 
 #include "Core.h"
 
@@ -66,7 +77,13 @@ bool LeiaSR_TryInit(ID3D11Device*             /*device*/,
         return false;
     }
 
-    HRESULT hr = SimulatedReality::CreateSRInterfaceDX11(ctx, hwnd, &g_sr);
+    HRESULT hr = E_FAIL;
+    try {
+        hr = SimulatedReality::CreateSRInterfaceDX11(ctx, hwnd, &g_sr);
+    } catch (...) {
+        hr = E_FAIL;
+        g_sr = nullptr;
+    }
     if (FAILED(hr) || !g_sr) {
         KLOG(L"LeiaSR: CreateSRInterfaceDX11 hr=0x%x (likely SR runtime missing); falling back\n", hr);
         g_sr = nullptr;
@@ -82,9 +99,27 @@ bool LeiaSR_TryInit(ID3D11Device*             /*device*/,
 }
 
 
-void LeiaSR_Weave()
+bool LeiaSR_Weave()
 {
-    if (g_sr && g_srActive) g_sr->Weave();
+    if (!g_sr || !g_srActive) return false;
+
+    try {
+        g_sr->Weave();
+    } catch (...) {
+        // Most likely the SR display was unplugged (or the SR service died)
+        // mid-session. Drop the weaver and stay down for the rest of the
+        // session — retrying every frame would just throw every frame. The
+        // caller composes this frame the normal way.
+        KLOG(L"LeiaSR: weave threw (display unplugged / service gone); falling back to compose\n");
+        g_srActive = false;
+        if (g_sr) {
+            try { g_sr->Delete(); } catch (...) {}
+            g_sr = nullptr;
+        }
+        g_srInputSRV = nullptr;
+        return false;
+    }
+    return true;
 }
 
 

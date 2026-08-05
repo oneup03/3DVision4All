@@ -81,7 +81,12 @@
     <ClCompile Include="Init.cpp" />
     <ClCompile Include="Log.cpp" />
     <ClCompile Include="Output_Katanga.cpp" />
-    <ClCompile Include="Output_LeiaSR.cpp" />
+    <ClCompile Include="Output_LeiaSR.cpp">
+      <!-- /EHsc for this TU only: the SR weaver throws when the SR display is
+           unplugged mid-session, and this file is where we catch it. Scoped
+           per-file so the rest of Core keeps its no-unwind codegen. -->
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="Output_Overlay.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

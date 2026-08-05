@@ -382,7 +382,9 @@ bool LeiaSR_TryInit(ID3D11Device*             device,
                     ID3D11DeviceContext*      ctx,
                     HWND                      hwnd,
                     ID3D11ShaderResourceView* stagingSRV);
-void LeiaSR_Weave();
+// Returns false when the weave didn't happen (weaver inactive, or it threw
+// because the SR display went away) — compose the frame normally instead.
+bool LeiaSR_Weave();
 bool LeiaSR_IsActive();
 void LeiaSR_Shutdown();
 
