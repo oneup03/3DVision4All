@@ -4,6 +4,7 @@
 [submodule "third_party/SR-lib"]
 	path = third_party/SR-lib
 	url = https://github.com/bo3b/SR-lib.git
+	branch = api_expansion
 [submodule "third_party/nvapi"]
 	path = third_party/nvapi
 	url = https://github.com/NVIDIA/nvapi.git
